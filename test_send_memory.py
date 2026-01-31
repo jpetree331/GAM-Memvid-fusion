@@ -52,6 +52,35 @@ def send_test_memory(
 
     try:
         with httpx.Client(timeout=30.0) as client:
+            # First, call echo endpoint to verify what server receives
+            print("=" * 60)
+            print("STEP 1: Calling /debug/echo to verify server receives created_at")
+            print("=" * 60)
+            try:
+                echo_response = client.post(
+                    f"{server_url}/debug/echo",
+                    json=payload
+                )
+                if echo_response.status_code == 200:
+                    echo_data = echo_response.json()
+                    print("Echo response:")
+                    print(json.dumps(echo_data, indent=2))
+                    received_created_at = echo_data.get("received", {}).get("created_at")
+                    print(f"\nServer received created_at: {received_created_at!r}")
+                    if received_created_at == test_timestamp:
+                        print("PASS: Server received correct timestamp!")
+                    else:
+                        print(f"FAIL: Expected {test_timestamp!r}, got {received_created_at!r}")
+                else:
+                    print(f"Echo endpoint returned: {echo_response.status_code}")
+            except Exception as e:
+                print(f"Echo endpoint not available: {e}")
+            print()
+
+            # Now send the actual memory
+            print("=" * 60)
+            print("STEP 2: Sending memory via /memory/add")
+            print("=" * 60)
             response = client.post(
                 f"{server_url}/memory/add",
                 json=payload

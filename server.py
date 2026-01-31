@@ -479,6 +479,31 @@ async def health_check():
 
 
 # =============================================================================
+# Debug Endpoints
+# =============================================================================
+
+@app.post("/debug/echo")
+async def debug_echo(request: AddPearlRequest):
+    """
+    DEBUG: Echo back exactly what the server received.
+    Helps diagnose if created_at is being parsed correctly.
+    """
+    return {
+        "received": {
+            "model_id": request.model_id,
+            "user_message_length": len(request.user_message),
+            "ai_response_length": len(request.ai_response),
+            "tags": request.tags,
+            "category": request.category,
+            "importance": request.importance,
+            "user_name": request.user_name,
+            "created_at": request.created_at,
+            "created_at_type": type(request.created_at).__name__
+        }
+    }
+
+
+# =============================================================================
 # Memvid Endpoints (Dashboard & Valve)
 # =============================================================================
 
@@ -556,19 +581,23 @@ async def add_pearl(request: AddPearlRequest):
     Called by OpenWebUI's outlet() after each turn.
     """
     try:
+        # DEBUG: Log ALL request fields to see exactly what Pydantic parsed
         logger.info(f"POST /memory/add for model={request.model_id}")
-        logger.info(f"  created_at from request: {request.created_at!r}")  # DEBUG: Show exact value
+        logger.info(f"  REQUEST DUMP: model_id={request.model_id!r}")
+        logger.info(f"  REQUEST DUMP: created_at={request.created_at!r} (type={type(request.created_at).__name__})")
+        logger.info(f"  REQUEST DUMP: tags={request.tags!r}")
+        logger.info(f"  REQUEST DUMP: category={request.category!r}")
+        logger.info(f"  REQUEST DUMP: importance={request.importance!r}")
+        logger.info(f"  REQUEST DUMP: user_name={request.user_name!r}")
         logger.debug(f"  user_message length: {len(request.user_message)}")
         logger.debug(f"  ai_response length: {len(request.ai_response)}")
-        logger.debug(f"  user_message (first 100): {request.user_message[:100] if request.user_message else 'EMPTY'}")
-        logger.debug(f"  ai_response (first 100): {request.ai_response[:100] if request.ai_response else 'EMPTY'}")
-        logger.debug(f"  tags: {request.tags}")
 
         vault_mgr = get_vault_mgr()
         store = vault_mgr.get_store(request.model_id)
 
-        # Pass created_at explicitly - ensure it's not None or empty
-        effective_created_at = request.created_at if request.created_at else None
+        # Pass created_at explicitly - DO NOT default to None, keep the value!
+        # The issue was: if created_at is a valid string, pass it through
+        effective_created_at = request.created_at  # Pass through as-is, let add_pearl handle None
         logger.info(f"  Passing to add_pearl: created_at={effective_created_at!r}")
 
         pearl_id = store.add_pearl(
