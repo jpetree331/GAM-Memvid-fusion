@@ -273,6 +273,15 @@ def api_search(model_id: str, query: str, limit: int = 10) -> List[SearchResult]
                     else:
                         user_msg = text
 
+                # Extract timestamp - prioritize metadata (original conversation time)
+                # over top-level created_at (which may be upload/import time)
+                metadata = item.get("metadata", {})
+                true_timestamp = (
+                    metadata.get("timestamp") or
+                    metadata.get("created_at") or
+                    item.get("created_at")
+                )
+
                 pearl = Pearl(
                     id=item.get("id", ""),
                     user_message=user_msg,
@@ -280,7 +289,7 @@ def api_search(model_id: str, query: str, limit: int = 10) -> List[SearchResult]
                     category=item.get("category", "context"),
                     importance=item.get("importance", "normal"),
                     tags=item.get("tags", []),
-                    created_at=item.get("created_at"),
+                    created_at=true_timestamp,
                     status=item.get("status", "active")
                 )
                 results.append(SearchResult(
