@@ -43,8 +43,14 @@ from synthesizer import get_synthesizer, Synthesizer
 # Logging Setup
 # =============================================================================
 
-logging.basicConfig(level=logging.INFO)
+# Allow LOG_LEVEL to be set via environment (DEBUG, INFO, WARNING, ERROR)
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 logger = logging.getLogger("gam-memvid")
+logger.setLevel(getattr(logging, log_level, logging.INFO))
 
 
 # =============================================================================
@@ -164,8 +170,14 @@ def hydrate_pearl(raw_pearl: Any) -> dict:
     Returns:
         A flat dictionary safe for JSON serialization
     """
+    logger.debug("=" * 60)
+    logger.debug("HYDRATE_PEARL INPUT")
+    logger.debug(f"  Type: {type(raw_pearl).__name__}")
+    logger.debug(f"  Repr (first 500): {repr(raw_pearl)[:500]}")
+
     # Handle None
     if raw_pearl is None:
+        logger.debug("  -> INPUT IS NONE, returning empty dict")
         return {
             "id": None,
             "text": "",
@@ -197,25 +209,40 @@ def hydrate_pearl(raw_pearl: Any) -> dict:
     pearl_obj = safe_get(raw_pearl, "pearl", raw_pearl)
     score = safe_get(raw_pearl, "score", 0.0)
 
+    logger.debug(f"  pearl_obj type: {type(pearl_obj).__name__}")
+    logger.debug(f"  score: {score}")
+
     # Get metadata - could be on pearl or raw_pearl
     metadata = safe_get(pearl_obj, "metadata") or safe_get(raw_pearl, "metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {}
 
+    logger.debug(f"  metadata keys: {list(metadata.keys()) if metadata else 'NONE'}")
+    logger.debug(f"  metadata.full_payload exists: {'full_payload' in metadata}")
+
     # Get text field (fingerprint in Super-Index)
     text = safe_get(pearl_obj, "text") or safe_get(raw_pearl, "text") or ""
+    logger.debug(f"  text field (first 200): {text[:200] if text else 'EMPTY'}")
 
     # Try to get user_message and ai_response directly first (Pearl objects have these)
     user_message = safe_get(pearl_obj, "user_message") or ""
     ai_response = safe_get(pearl_obj, "ai_response") or ""
 
+    logger.debug(f"  DIRECT user_message (first 100): {user_message[:100] if user_message else 'EMPTY'}")
+    logger.debug(f"  DIRECT ai_response (first 100): {ai_response[:100] if ai_response else 'EMPTY'}")
+
     # If not found directly, try to extract from full_payload in metadata
     full_payload = metadata.get("full_payload")
+    logger.debug(f"  full_payload type: {type(full_payload).__name__ if full_payload else 'None'}")
+
     if isinstance(full_payload, dict):
+        logger.debug(f"  full_payload keys: {list(full_payload.keys())}")
         if not user_message:
             user_message = full_payload.get("user", "")
+            logger.debug(f"  FROM full_payload.user (first 100): {user_message[:100] if user_message else 'EMPTY'}")
         if not ai_response:
             ai_response = full_payload.get("ai", "")
+            logger.debug(f"  FROM full_payload.ai (first 100): {ai_response[:100] if ai_response else 'EMPTY'}")
 
     # Also check payload_user/payload_ai format
     if not user_message:
@@ -285,7 +312,13 @@ def hydrate_pearl(raw_pearl: Any) -> dict:
         "active"
     )
 
-    return {
+    # Log warning if both user_message and ai_response are empty
+    if not user_message and not ai_response:
+        logger.warning(f"HYDRATE WARNING: Both user_message and ai_response are EMPTY for pearl_id={pearl_id}")
+        logger.warning(f"  -> text field was: {text[:200] if text else 'EMPTY'}")
+        logger.warning(f"  -> full_payload was: {full_payload}")
+
+    result = {
         "id": pearl_id,
         "text": hydrated_text,
         "user_message": user_message,
@@ -299,6 +332,15 @@ def hydrate_pearl(raw_pearl: Any) -> dict:
         "importance": importance,
         "status": status
     }
+
+    logger.debug("HYDRATE_PEARL OUTPUT:")
+    logger.debug(f"  id: {result['id']}")
+    logger.debug(f"  user_message (first 100): {result['user_message'][:100] if result['user_message'] else 'EMPTY'}")
+    logger.debug(f"  ai_response (first 100): {result['ai_response'][:100] if result['ai_response'] else 'EMPTY'}")
+    logger.debug(f"  created_at: {result['created_at']}")
+    logger.debug("=" * 60)
+
+    return result
 
 
 # =============================================================================
@@ -626,20 +668,51 @@ async def get_recent_memories(
     Returns hydrated Pearls with full conversation text.
     """
     try:
+        logger.info(f"GET /memory/{model_id}/recent called with limit={limit}")
+
         vault_mgr = get_vault_mgr()
         store = vault_mgr.get_store(model_id)
 
         # Try to get recent pearls
         try:
             memories = store.get_recent(limit=limit)
+            logger.info(f"store.get_recent returned {len(memories)} items")
         except AttributeError:
             # Fallback: search with broad query
             logger.warning("get_recent not available, using search fallback")
             results = store.search_pearls(query="*", limit=limit)
             memories = [r.pearl if hasattr(r, 'pearl') else r for r in results]
+            logger.info(f"search fallback returned {len(memories)} items")
+
+        # DEBUG: Log RAW pearls before hydration
+        logger.debug("=" * 80)
+        logger.debug("RAW PEARLS FROM STORE (before hydration):")
+        for i, m in enumerate(memories[:3]):  # Log first 3
+            logger.debug(f"  RAW[{i}] type: {type(m).__name__}")
+            if hasattr(m, '__dict__'):
+                logger.debug(f"  RAW[{i}] __dict__ keys: {list(m.__dict__.keys())}")
+            if hasattr(m, 'user_message'):
+                logger.debug(f"  RAW[{i}] .user_message (first 100): {m.user_message[:100] if m.user_message else 'EMPTY'}")
+            if hasattr(m, 'ai_response'):
+                logger.debug(f"  RAW[{i}] .ai_response (first 100): {m.ai_response[:100] if m.ai_response else 'EMPTY'}")
+            if hasattr(m, 'metadata'):
+                logger.debug(f"  RAW[{i}] .metadata keys: {list(m.metadata.keys()) if isinstance(m.metadata, dict) else 'NOT A DICT'}")
+            if isinstance(m, dict):
+                logger.debug(f"  RAW[{i}] dict keys: {list(m.keys())}")
+        logger.debug("=" * 80)
 
         # Hydrate all results
         hydrated = [hydrate_pearl(m) for m in memories]
+
+        # DEBUG: Log HYDRATED results
+        logger.debug("=" * 80)
+        logger.debug("HYDRATED PEARLS (after hydration):")
+        for i, h in enumerate(hydrated[:3]):  # Log first 3
+            logger.debug(f"  HYDRATED[{i}] id: {h.get('id')}")
+            logger.debug(f"  HYDRATED[{i}] user_message (first 100): {h.get('user_message', '')[:100] if h.get('user_message') else 'EMPTY'}")
+            logger.debug(f"  HYDRATED[{i}] ai_response (first 100): {h.get('ai_response', '')[:100] if h.get('ai_response') else 'EMPTY'}")
+            logger.debug(f"  HYDRATED[{i}] created_at: {h.get('created_at')}")
+        logger.debug("=" * 80)
 
         # Sort by created_at (most recent first)
         hydrated.sort(key=lambda x: x.get("created_at") or "", reverse=True)

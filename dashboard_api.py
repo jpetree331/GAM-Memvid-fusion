@@ -24,12 +24,24 @@ Environment:
 """
 
 import os
+import logging
 from datetime import datetime
 from typing import Optional, List
 from dataclasses import dataclass
 
 import streamlit as st
 import httpx
+
+# =============================================================================
+# Logging Setup
+# =============================================================================
+
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("dashboard-api")
 
 # =============================================================================
 # Configuration
@@ -184,6 +196,8 @@ def api_get_stats(model_id: str) -> dict:
 def api_get_recent(model_id: str, limit: int = 50) -> List[Pearl]:
     """Get recent memories."""
     try:
+        logger.info(f"api_get_recent called for model={model_id}, limit={limit}")
+
         with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
             r = client.get(
                 f"{MEMORY_SERVER_URL}/memory/{model_id}/recent",
@@ -192,11 +206,31 @@ def api_get_recent(model_id: str, limit: int = 50) -> List[Pearl]:
             r.raise_for_status()
             data = r.json()
 
+            logger.debug(f"API response keys: {list(data.keys())}")
+            logger.debug(f"API response count: {data.get('count')}")
+
             # Handle both "memories" and "items" keys
             items = data.get("memories") or data.get("items") or []
 
+            logger.info(f"Received {len(items)} items from API")
+
+            # DEBUG: Log first item received from server
+            if items:
+                first = items[0]
+                logger.debug("=" * 60)
+                logger.debug("DASHBOARD RECEIVED - FIRST ITEM:")
+                logger.debug(f"  Keys: {list(first.keys())}")
+                logger.debug(f"  id: {first.get('id')}")
+                logger.debug(f"  user_message: {first.get('user_message', 'KEY MISSING')[:100] if first.get('user_message') else 'EMPTY/NONE'}")
+                logger.debug(f"  ai_response: {first.get('ai_response', 'KEY MISSING')[:100] if first.get('ai_response') else 'EMPTY/NONE'}")
+                logger.debug(f"  text: {first.get('text', 'KEY MISSING')[:100] if first.get('text') else 'EMPTY/NONE'}")
+                logger.debug(f"  content: {first.get('content', 'KEY MISSING')[:100] if first.get('content') else 'EMPTY/NONE'}")
+                logger.debug(f"  created_at: {first.get('created_at')}")
+                logger.debug(f"  tags: {first.get('tags')}")
+                logger.debug("=" * 60)
+
             pearls = []
-            for m in items:
+            for i, m in enumerate(items):
                 # Extract text content - handle hydrated format
                 user_msg = m.get("user_message", "")
                 ai_msg = m.get("ai_response", "")
@@ -204,10 +238,13 @@ def api_get_recent(model_id: str, limit: int = 50) -> List[Pearl]:
                 # If not found, try to parse from "text" field
                 if not user_msg and not ai_msg:
                     text = m.get("text", "") or m.get("content", "")
+                    logger.debug(f"  Item[{i}]: user_message and ai_response EMPTY, falling back to text/content")
+                    logger.debug(f"  Item[{i}]: text/content (first 200): {text[:200] if text else 'ALSO EMPTY'}")
                     if "User:" in text and "AI:" in text:
                         parts = text.split("AI:", 1)
                         user_msg = parts[0].replace("User:", "").strip()
                         ai_msg = parts[1].strip() if len(parts) > 1 else ""
+                        logger.debug(f"  Item[{i}]: Parsed from text - user_msg={user_msg[:50] if user_msg else 'EMPTY'}")
                     else:
                         user_msg = text
 
@@ -221,8 +258,17 @@ def api_get_recent(model_id: str, limit: int = 50) -> List[Pearl]:
                     created_at=m.get("created_at"),
                     status=m.get("status", "active")
                 ))
+
+            # Log what dashboard will render
+            if pearls:
+                logger.debug("DASHBOARD WILL RENDER - FIRST PEARL:")
+                logger.debug(f"  id: {pearls[0].id}")
+                logger.debug(f"  user_message (first 100): {pearls[0].user_message[:100] if pearls[0].user_message else 'EMPTY'}")
+                logger.debug(f"  ai_response (first 100): {pearls[0].ai_response[:100] if pearls[0].ai_response else 'EMPTY'}")
+
             return pearls
     except Exception as e:
+        logger.exception(f"Failed to get recent memories for {model_id}")
         st.error(f"Failed to get recent memories: {e}")
         return []
 
