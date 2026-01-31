@@ -1,0 +1,56 @@
+# GAM-Memvid: AI Memory System with Memvid Storage
+# Core dependencies
+
+# =============================================================================
+# THE VAULT - Memvid Storage Layer
+# =============================================================================
+# Single-file AI memory with hybrid search (lexical + semantic)
+# [fastembed] extra enables local embeddings with bge-small-en-v1.5
+memvid-sdk[fastembed]>=2.0.0
+
+# =============================================================================
+# API Server
+# =============================================================================
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+python-multipart>=0.0.6
+
+# HTTP client for OpenWebUI webhooks
+httpx>=0.25.0
+aiofiles>=23.0.0
+
+# =============================================================================
+# Environment and Configuration
+# =============================================================================
+python-dotenv>=1.0.0
+
+# Date/time handling for historical imports
+python-dateutil>=2.8.0
+
+# =============================================================================
+# Dashboard (optional)
+# =============================================================================
+streamlit>=1.28.0
+
+# =============================================================================
+# THE BRAIN - Memory Condenser (LLM-powered extraction)
+# =============================================================================
+# Gemini 2.0 Flash (default, very cost effective)
+google-genai>=1.0.0
+
+# =============================================================================
+# Local Embeddings (for Memvid semantic search)
+# =============================================================================
+# sentence-transformers provides local embedding models like all-MiniLM-L6-v2
+# Memvid can use bge-small natively, but this provides fallback compatibility
+sentence-transformers>=2.2.0
+
+# =============================================================================
+# REMOVED: GAM Library
+# =============================================================================
+# The gam library (FAISS, BM25 retrievers) has been replaced by Memvid
+# which handles both vector and lexical search internally.
+# This eliminates:
+# - git+https://github.com/VectorSpaceLab/general-agentic-memory.git
+# - FlagEmbedding>=1.2.0 (was for GAM's dense retriever)
