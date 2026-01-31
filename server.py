@@ -295,8 +295,25 @@ async def search_memories(request: SearchRequest):
             limit=request.limit
         )
 
+        # Flatten results for dashboard compatibility
+        flat_results = []
+        for r in results:
+            flat_results.append({
+                "id": r.pearl.id,
+                "user_message": r.pearl.user_message,
+                "ai_response": r.pearl.ai_response,
+                "content": r.pearl.full_content,  # Combined content
+                "category": r.pearl.category,
+                "importance": r.pearl.importance,
+                "tags": r.pearl.tags,
+                "created_at": r.pearl.created_at,
+                "status": r.pearl.status,
+                "score": r.score,
+                "preview": r.preview
+            })
+
         return SearchResponse(
-            results=[r.to_dict() for r in results],
+            results=flat_results,
             count=len(results)
         )
 
@@ -378,10 +395,26 @@ async def get_recent_memories(
         vault_mgr = get_vault_mgr()
         store = vault_mgr.get_store(model_id)
         memories = store.get_recent(limit=limit)
+
+        # Flatten for dashboard compatibility
+        flat_memories = []
+        for m in memories:
+            flat_memories.append({
+                "id": m.id,
+                "user_message": m.user_message,
+                "ai_response": m.ai_response,
+                "content": m.full_content,
+                "category": m.category,
+                "importance": m.importance,
+                "tags": m.tags,
+                "created_at": m.created_at,
+                "status": m.status
+            })
+
         return {
             "model_id": model_id,
             "count": len(memories),
-            "memories": [m.to_dict() for m in memories]
+            "memories": flat_memories
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
