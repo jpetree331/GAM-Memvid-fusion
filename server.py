@@ -221,9 +221,15 @@ def hydrate_pearl(raw_pearl: Any) -> dict:
     logger.debug(f"  metadata keys: {list(metadata.keys()) if metadata else 'NONE'}")
     logger.debug(f"  metadata.full_payload exists: {'full_payload' in metadata}")
 
-    # Get text field (fingerprint in Super-Index)
-    text = safe_get(pearl_obj, "text") or safe_get(raw_pearl, "text") or ""
-    logger.debug(f"  text field (first 200): {text[:200] if text else 'EMPTY'}")
+    # Get text field (fingerprint in Super-Index, or content for MemoryEntry)
+    text = (
+        safe_get(pearl_obj, "text") or
+        safe_get(raw_pearl, "text") or
+        safe_get(pearl_obj, "content") or
+        safe_get(raw_pearl, "content") or
+        ""
+    )
+    logger.debug(f"  text/content field (first 200): {text[:200] if text else 'EMPTY'}")
 
     # Try to get user_message and ai_response directly first (Pearl objects have these)
     user_message = safe_get(pearl_obj, "user_message") or ""
