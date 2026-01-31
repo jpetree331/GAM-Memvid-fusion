@@ -336,9 +336,13 @@ async def delete_pearl(model_id: str, request: DeleteRequest):
 async def list_models():
     """List all models with vaults."""
     vault_mgr = get_vault_mgr()
+    vault_files = vault_mgr.get_all_vault_files()
+    # Return model IDs (strip .mv2 extension)
+    model_ids = [f.replace(".mv2", "") for f in vault_files]
     return {
+        "models": model_ids,  # Dashboard expects this key
         "active_models": vault_mgr.list_models(),
-        "all_vault_files": vault_mgr.get_all_vault_files()
+        "all_vault_files": vault_files
     }
 
 
