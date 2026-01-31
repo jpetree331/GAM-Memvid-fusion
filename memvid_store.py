@@ -631,7 +631,7 @@ class MemvidStore:
 
         Args:
             model_id: The AI model/persona identifier (e.g., "eli", "opus")
-            vaults_dir: Directory for vault files (default: ./data/vaults)
+            vaults_dir: Directory for vault files (default: config.VAULTS_DIR)
             embedding_model: Embedding model for vector search (default: bge-small-en-v1.5)
         """
         if not MEMVID_AVAILABLE:
@@ -648,7 +648,8 @@ class MemvidStore:
 
         # Set up vault directory
         if vaults_dir is None:
-            vaults_dir = Path("./data/vaults")
+            from config import config
+            vaults_dir = config.VAULTS_DIR
         self.vaults_dir = Path(vaults_dir)
         self.vaults_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1554,7 +1555,8 @@ class VaultManager:
         embedding_model: Optional[str] = None
     ):
         if vaults_dir is None:
-            vaults_dir = Path("./data/vaults")
+            from config import config
+            vaults_dir = config.VAULTS_DIR
         self.vaults_dir = Path(vaults_dir)
         self.vaults_dir.mkdir(parents=True, exist_ok=True)
         self.embedding_model = embedding_model or DEFAULT_EMBEDDING_MODEL
@@ -1636,4 +1638,5 @@ def get_vault_manager(vaults_dir: Optional[Path] = None) -> VaultManager:
 
 def get_store(model_id: str) -> MemvidStore:
     """Convenience function to get a model's vault store."""
-    return get_vault_manager().get_store(model_id)
+    from config import config
+    return get_vault_manager(config.VAULTS_DIR).get_store(model_id)
