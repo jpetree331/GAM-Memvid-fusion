@@ -330,6 +330,20 @@ def api_delete_pearl(model_id: str, pearl_id: str, reason: str = "") -> dict:
         return {"success": False, "message": str(e)}
 
 
+def api_delete_vault(model_id: str) -> dict:
+    """Delete an entire vault file."""
+    try:
+        with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+            r = client.delete(
+                f"{MEMORY_SERVER_URL}/memory/{model_id}/vault",
+                params={"confirm": "true"}
+            )
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
 # =============================================================================
 # Helper Functions
 # =============================================================================
@@ -403,6 +417,55 @@ def render_sidebar():
         st.sidebar.markdown(f"Version: {health.get('version', 'Unknown')}")
     else:
         st.sidebar.error(f"Server: {health.get('error', 'Disconnected')}")
+
+    st.sidebar.markdown("---")
+
+    # Vault Actions
+    st.sidebar.subheader("Vault Actions")
+
+    if selected_vault:
+        # Export buttons
+        col1, col2 = st.sidebar.columns(2)
+
+        with col1:
+            # Export as JSON
+            json_url = f"{MEMORY_SERVER_URL}/memory/{selected_vault}/export/json"
+            st.markdown(
+                f'<a href="{json_url}" target="_blank">'
+                f'<button style="width:100%;padding:0.5em;cursor:pointer;">Export JSON</button>'
+                f'</a>',
+                unsafe_allow_html=True
+            )
+
+        with col2:
+            # Export as .mv2
+            mv2_url = f"{MEMORY_SERVER_URL}/memory/{selected_vault}/export/mv2"
+            st.markdown(
+                f'<a href="{mv2_url}" target="_blank">'
+                f'<button style="width:100%;padding:0.5em;cursor:pointer;">Export .mv2</button>'
+                f'</a>',
+                unsafe_allow_html=True
+            )
+
+        st.sidebar.markdown("")
+
+        # Delete button with confirmation
+        with st.sidebar.expander("Danger Zone", expanded=False):
+            st.warning("Deleting a vault is permanent!")
+            delete_confirm = st.text_input(
+                f"Type '{selected_vault}' to confirm deletion:",
+                key="delete_confirm"
+            )
+            if st.button("Delete Vault", type="secondary"):
+                if delete_confirm == selected_vault:
+                    result = api_delete_vault(selected_vault)
+                    if result.get("success"):
+                        st.success(f"Deleted: {selected_vault}")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed: {result.get('message', 'Unknown error')}")
+                else:
+                    st.error("Confirmation text doesn't match. Deletion cancelled.")
 
     return selected_vault, user_name
 

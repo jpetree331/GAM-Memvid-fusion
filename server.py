@@ -35,6 +35,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from config import config
@@ -556,15 +557,19 @@ async def add_pearl(request: AddPearlRequest):
     """
     try:
         logger.info(f"POST /memory/add for model={request.model_id}")
+        logger.info(f"  created_at from request: {request.created_at!r}")  # DEBUG: Show exact value
         logger.debug(f"  user_message length: {len(request.user_message)}")
         logger.debug(f"  ai_response length: {len(request.ai_response)}")
         logger.debug(f"  user_message (first 100): {request.user_message[:100] if request.user_message else 'EMPTY'}")
         logger.debug(f"  ai_response (first 100): {request.ai_response[:100] if request.ai_response else 'EMPTY'}")
         logger.debug(f"  tags: {request.tags}")
-        logger.debug(f"  created_at: {request.created_at}")
 
         vault_mgr = get_vault_mgr()
         store = vault_mgr.get_store(request.model_id)
+
+        # Pass created_at explicitly - ensure it's not None or empty
+        effective_created_at = request.created_at if request.created_at else None
+        logger.info(f"  Passing to add_pearl: created_at={effective_created_at!r}")
 
         pearl_id = store.add_pearl(
             user_message=request.user_message,
@@ -573,7 +578,7 @@ async def add_pearl(request: AddPearlRequest):
             category=request.category or "context",
             importance=request.importance or "normal",
             user_name=request.user_name or "User",
-            created_at=request.created_at
+            created_at=effective_created_at
         )
 
         word_count = len(request.user_message.split()) + len(request.ai_response.split())
@@ -721,7 +726,7 @@ async def get_model_stats(model_id: str):
 
 @app.get("/memory/{model_id}/export")
 async def export_model(model_id: str):
-    """Export all Pearls from a model's vault."""
+    """Export all Pearls from a model's vault as JSON."""
     try:
         vault_mgr = get_vault_mgr()
         store = vault_mgr.get_store(model_id)
@@ -729,6 +734,119 @@ async def export_model(model_id: str):
     except Exception as e:
         logger.exception("Error exporting model %s", model_id)
         raise HTTPException(status_code=500, detail="Failed to export vault")
+
+
+@app.get("/memory/{model_id}/export/json")
+async def export_model_json_download(model_id: str):
+    """
+    Export all Pearls as a downloadable JSON file.
+
+    Returns a JSON file download with all memories for this model.
+    """
+    try:
+        vault_mgr = get_vault_mgr()
+        store = vault_mgr.get_store(model_id)
+        export_data = store.export()
+
+        # Return as downloadable JSON
+        import json
+        json_content = json.dumps(export_data, indent=2, default=str)
+
+        return JSONResponse(
+            content=export_data,
+            headers={
+                "Content-Disposition": f"attachment; filename={model_id}_memories.json"
+            }
+        )
+    except Exception as e:
+        logger.exception("Error exporting model %s as JSON", model_id)
+        raise HTTPException(status_code=500, detail="Failed to export vault")
+
+
+@app.get("/memory/{model_id}/export/mv2")
+async def export_model_mv2_download(model_id: str):
+    """
+    Download the raw .mv2 vault file.
+
+    Returns the actual .mv2 file for backup or transfer purposes.
+    """
+    try:
+        vaults_dir = Path(config.VAULTS_DIR)
+        vault_file = vaults_dir / f"{model_id}.mv2"
+
+        if not vault_file.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Vault file not found: {model_id}.mv2"
+            )
+
+        return FileResponse(
+            path=str(vault_file),
+            filename=f"{model_id}.mv2",
+            media_type="application/octet-stream"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error downloading vault file for model %s", model_id)
+        raise HTTPException(status_code=500, detail="Failed to download vault file")
+
+
+@app.delete("/memory/{model_id}/vault")
+async def delete_vault(model_id: str, confirm: bool = False):
+    """
+    Delete a model's vault file (.mv2).
+
+    WARNING: This permanently deletes all memories for this model!
+
+    Args:
+        model_id: The model ID whose vault to delete
+        confirm: Must be True to actually delete (safety check)
+
+    Returns:
+        Success/failure message
+    """
+    if not confirm:
+        return {
+            "success": False,
+            "message": "Safety check: Add ?confirm=true to actually delete the vault",
+            "model_id": model_id,
+            "warning": "This will PERMANENTLY delete all memories for this model!"
+        }
+
+    try:
+        vault_mgr = get_vault_mgr()
+        vaults_dir = Path(config.VAULTS_DIR)
+
+        # Close the store if it's open
+        if model_id in vault_mgr._stores:
+            vault_mgr._stores[model_id].close()
+            del vault_mgr._stores[model_id]
+
+        # Find and delete the vault file
+        vault_file = vaults_dir / f"{model_id}.mv2"
+
+        if not vault_file.exists():
+            return {
+                "success": False,
+                "message": f"Vault file not found: {vault_file.name}",
+                "model_id": model_id
+            }
+
+        # Delete the file
+        vault_file.unlink()
+        logger.info(f"Deleted vault file: {vault_file}")
+
+        return {
+            "success": True,
+            "message": f"Vault deleted successfully",
+            "model_id": model_id,
+            "deleted_file": vault_file.name
+        }
+
+    except Exception as e:
+        logger.exception("Error deleting vault for model %s", model_id)
+        raise HTTPException(status_code=500, detail=f"Failed to delete vault: {str(e)}")
 
 
 @app.get("/memory/{model_id}/debug-raw")

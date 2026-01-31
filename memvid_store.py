@@ -551,6 +551,12 @@ class Pearl:
                     if tag and tag not in tags:
                         tags.append(tag)
 
+        # DEBUG: Log what created_at value we're reading from metadata
+        stored_created_at = meta.get("created_at")
+        effective_created_at = stored_created_at if stored_created_at else datetime.now().isoformat()
+        print(f"[Librarian DEBUG] from_memvid_hit - metadata.created_at: {stored_created_at!r}")
+        print(f"[Librarian DEBUG] from_memvid_hit - using: {effective_created_at}")
+
         return cls(
             id=hit_dict.get("frame_id", hit_dict.get("title", "")),
             user_message=user_message,
@@ -559,7 +565,7 @@ class Pearl:
             category=category,
             importance=importance,
             emotional_tone=meta.get("emotional_tone"),
-            created_at=meta.get("created_at", datetime.now().isoformat()),
+            created_at=effective_created_at,
             status=status,
             user_name=meta.get("user_name", "User"),
             thread_id=meta.get("thread_id"),
@@ -774,6 +780,11 @@ class MemvidStore:
         if not pearl_id:
             pearl_id = f"pearl_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
+        # DEBUG: Log the created_at value being used
+        effective_created_at = created_at if created_at else datetime.now().isoformat()
+        print(f"[Librarian DEBUG] add_pearl called with created_at={created_at!r}")
+        print(f"[Librarian DEBUG] Using effective_created_at={effective_created_at}")
+
         pearl = Pearl(
             id=pearl_id,
             user_message=user_message,
@@ -782,7 +793,7 @@ class MemvidStore:
             category=category,
             importance=importance,
             emotional_tone=emotional_tone,
-            created_at=created_at or datetime.now().isoformat(),
+            created_at=effective_created_at,
             status=FrameStatus.ACTIVE.value,
             user_name=user_name,
             thread_id=thread_id,
