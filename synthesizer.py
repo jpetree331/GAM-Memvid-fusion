@@ -69,29 +69,37 @@ CRITICAL REQUIREMENTS:
 4. Note any commitments, promises, or agreements made
 5. Highlight any personal information shared
 
+EPISTEMIC INTEGRITY - ESSENTIAL:
+- Do NOT put past user statements in quotation marks unless you are copying EXACTLY
+- When referring to what the user said, prefer formulations like:
+  * "You said something like..." or "You expressed that..." followed by a paraphrase
+  * "You mentioned..." or "You described..." for softer attribution
+  * "The conversation touched on..." for general topic references
+- Prioritize SEMANTIC FAITHFULNESS over poetic or embellished wording
+- Never fabricate direct quotes - if unsure of exact wording, paraphrase clearly
+- The goal is strong continuity WITHOUT misleading faux-quotes
+
 OUTPUT FORMAT (you MUST use this exact structure):
 
 ### Abstract
 (A detailed, 200-300 word summary of the core philosophical/emotional arguments.
-Do NOT include quotes in this section. Write as a flowing narrative that captures
-the essence of the exchange for relationship continuity.)
+Write as a flowing narrative. When referencing what the user said, paraphrase with
+clear attribution like "You expressed that..." rather than using quotation marks.
+Only use quotes for truly verbatim text.)
 
-### Verbatim Quotes
-"<Exact substring from the source text - quote 1>"
+### Key Points (Paraphrased)
+- [Clear paraphrase of important user statement with attribution]
+- [Another key point the user expressed]
+- [Key AI response or commitment made]
 
-"<Exact substring from the source text - quote 2>"
-
-"<Optional 3rd quote if highly relevant>"
-
-QUOTE REQUIREMENTS - STRICT FIDELITY:
-- Quotes MUST be exact substrings copied from the source text
-- Do NOT invent, paraphrase, or approximate - copy verbatim
-- Do NOT add Bible verses, author names, or references not in the source
-- Select quotes that represent the emotional core or central tension
-- Choose quotes that capture the user's voice and personality
+### Verbatim Quotes (ONLY if exact text is preserved)
+"<Exact substring copied from the source text>"
+(Include this section ONLY if you have genuinely verbatim text to preserve.
+It is better to omit this section than to include approximate quotes.)
 
 REMEMBER: This abstract helps the AI "remember" this exchange naturally.
-Quality over brevity - capture the essence, not just the facts."""
+Truthfulness and epistemic integrity matter - paraphrase clearly rather than
+fabricating quotes. The user values accuracy over polish."""
 
 SYNTHESIS_USER_TEMPLATE = """Create a detailed abstract of this conversation exchange.
 
@@ -106,10 +114,15 @@ AI: {ai_response}
 
 OUTPUT REQUIREMENTS:
 1. Write a 200-300 word abstract in the "### Abstract" section
-2. Include 2-3 VERBATIM quotes in the "### Verbatim Quotes" section
-3. Quotes must be EXACT substrings - copy directly from the text above, do not paraphrase
+   - Paraphrase user statements with clear attribution ("You expressed that...", "You mentioned...")
+   - Do NOT use quotation marks unless copying text EXACTLY
+2. List 2-4 key points in the "### Key Points (Paraphrased)" section
+   - Use clear paraphrases with attribution, not faux-quotes
+3. ONLY include "### Verbatim Quotes" if you have genuinely exact text to preserve
+   - Better to omit this section than include approximate quotes
+   - If included, quotes must be EXACT substrings copied from the text above
 
-Use the exact format specified in your instructions."""
+Prioritize semantic faithfulness and truthfulness over poetic wording."""
 
 
 BATCH_SYNTHESIS_PROMPT = """You are synthesizing multiple conversation exchanges into a combined context.
@@ -118,12 +131,23 @@ Create a flowing narrative that weaves together the key information from these e
 Organize by theme rather than chronologically if that makes more sense.
 Total target: 400-600 words for the combined context.
 
+EPISTEMIC INTEGRITY - ESSENTIAL:
+- Do NOT put user statements in quotation marks unless copying EXACTLY from the source
+- When referencing what the user said, use clear paraphrasing:
+  * "You said something like..." or "You expressed that..."
+  * "You mentioned..." or "You described..."
+  * "In a previous conversation, you noted that..."
+- Prioritize SEMANTIC FAITHFULNESS over poetic or embellished wording
+- Never fabricate direct quotes - paraphrase clearly when unsure of exact wording
+- The user values truthfulness and epistemic integrity over polish
+
 EXCHANGES:
 {exchanges}
 
 ---
 
-Create a unified context summary that an AI can use to "remember" these past conversations naturally."""
+Create a unified context summary that an AI can use to "remember" these past conversations naturally.
+Use clear paraphrases with attribution rather than faux-quotes."""
 
 
 # =============================================================================
