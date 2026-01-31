@@ -44,6 +44,7 @@ class AddPearlRequest(BaseModel):
     category: Optional[str] = Field(default="context", description="Category: context, theology, ai_theory, etc.")
     importance: Optional[str] = Field(default="normal", description="Importance: core, high, normal, low")
     user_name: Optional[str] = Field(default="User", description="User's display name")
+    created_at: Optional[str] = Field(default=None, description="Original timestamp (ISO format) for imports")
 
 
 class AddPearlResponse(BaseModel):
@@ -214,7 +215,8 @@ async def add_pearl(request: AddPearlRequest):
             tags=request.tags or [],
             category=request.category or "context",
             importance=request.importance or "normal",
-            user_name=request.user_name or "User"
+            user_name=request.user_name or "User",
+            created_at=request.created_at  # Preserve original timestamp for imports
         )
 
         word_count = len(request.user_message.split()) + len(request.ai_response.split())
