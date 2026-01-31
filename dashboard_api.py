@@ -146,9 +146,21 @@ def api_health_check() -> dict:
 
 
 def api_list_models() -> List[str]:
-    """Get list of available models."""
+    """Get list of available models/vaults."""
     try:
         with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+            # Try /memvid/vaults first (new endpoint)
+            try:
+                r = client.get(f"{MEMORY_SERVER_URL}/memvid/vaults")
+                r.raise_for_status()
+                data = r.json()
+                vaults = data.get("vaults", [])
+                # Strip .mv2 extension
+                return [v.replace(".mv2", "") for v in vaults]
+            except:
+                pass
+
+            # Fallback to /models
             r = client.get(f"{MEMORY_SERVER_URL}/models")
             r.raise_for_status()
             data = r.json()
@@ -179,12 +191,30 @@ def api_get_recent(model_id: str, limit: int = 50) -> List[Pearl]:
             )
             r.raise_for_status()
             data = r.json()
+
+            # Handle both "memories" and "items" keys
+            items = data.get("memories") or data.get("items") or []
+
             pearls = []
-            for m in data.get("memories", []):
+            for m in items:
+                # Extract text content - handle hydrated format
+                user_msg = m.get("user_message", "")
+                ai_msg = m.get("ai_response", "")
+
+                # If not found, try to parse from "text" field
+                if not user_msg and not ai_msg:
+                    text = m.get("text", "") or m.get("content", "")
+                    if "User:" in text and "AI:" in text:
+                        parts = text.split("AI:", 1)
+                        user_msg = parts[0].replace("User:", "").strip()
+                        ai_msg = parts[1].strip() if len(parts) > 1 else ""
+                    else:
+                        user_msg = text
+
                 pearls.append(Pearl(
                     id=m.get("id", ""),
-                    user_message=m.get("user_message", m.get("content", "")),
-                    ai_response=m.get("ai_response", ""),
+                    user_message=user_msg,
+                    ai_response=ai_msg,
                     category=m.get("category", "context"),
                     importance=m.get("importance", "normal"),
                     tags=m.get("tags", []),
@@ -201,22 +231,53 @@ def api_search(model_id: str, query: str, limit: int = 10) -> List[SearchResult]
     """Search memories."""
     try:
         with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-            r = client.post(
-                f"{MEMORY_SERVER_URL}/memory/search",
-                json={
-                    "model_id": model_id,
-                    "query": query,
-                    "limit": limit
-                }
-            )
-            r.raise_for_status()
+            # Try /memvid/search first, then fall back to /memory/search
+            try:
+                r = client.post(
+                    f"{MEMORY_SERVER_URL}/memvid/search",
+                    json={
+                        "model_id": model_id,
+                        "query": query,
+                        "limit": limit
+                    }
+                )
+                r.raise_for_status()
+            except:
+                r = client.post(
+                    f"{MEMORY_SERVER_URL}/memory/search",
+                    json={
+                        "model_id": model_id,
+                        "query": query,
+                        "limit": limit
+                    }
+                )
+                r.raise_for_status()
+
             data = r.json()
+
+            # Handle both "results" and "items" keys
+            items = data.get("results") or data.get("items") or []
+
             results = []
-            for item in data.get("results", []):
+            for item in items:
+                # Extract text content - handle hydrated format
+                user_msg = item.get("user_message", "")
+                ai_msg = item.get("ai_response", "")
+
+                # If not found, try to parse from "text" field
+                if not user_msg and not ai_msg:
+                    text = item.get("text", "") or item.get("content", "")
+                    if "User:" in text and "AI:" in text:
+                        parts = text.split("AI:", 1)
+                        user_msg = parts[0].replace("User:", "").strip()
+                        ai_msg = parts[1].strip() if len(parts) > 1 else ""
+                    else:
+                        user_msg = text
+
                 pearl = Pearl(
                     id=item.get("id", ""),
-                    user_message=item.get("user_message", item.get("content", "")),
-                    ai_response=item.get("ai_response", ""),
+                    user_message=user_msg,
+                    ai_response=ai_msg,
                     category=item.get("category", "context"),
                     importance=item.get("importance", "normal"),
                     tags=item.get("tags", []),

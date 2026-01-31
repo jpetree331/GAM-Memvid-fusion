@@ -8,18 +8,27 @@ Architecture:
 - Synthesizer: Creates detailed abstracts at retrieval time (gpt-4o-mini)
 - Per-model vault isolation (each model_id gets its own .mv2 file)
 
+Super-Index Format:
+- text field: Compact fingerprint (summary + keywords) for embedding search
+- metadata.full_payload: {"user": "...", "ai": "..."} with complete conversation
+
 Endpoints:
 - POST /memory/add - Store a new Pearl (user+AI exchange)
 - POST /memory/context - Get synthesized context for prompt injection
+- POST /memory/search - Search memories
+- POST /memvid/search - Search memories (alias for dashboard/valve)
+- GET /memvid/vaults - List available vaults
 - GET /health - Health check for Railway
 - GET /models - List available models
 - GET /memory/{model_id}/stats - Get vault statistics
+- GET /memory/{model_id}/recent - Get recent memories
 - POST /memory/{model_id}/delete - Soft delete a Pearl
 """
 import os
-import asyncio
+import logging
 from datetime import datetime
-from typing import Optional, List
+from pathlib import Path
+from typing import Optional, List, Any, Union
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
@@ -29,6 +38,13 @@ from pydantic import BaseModel, Field
 from config import config
 from memvid_store import get_store, get_vault_manager, MemvidStore, Pearl
 from synthesizer import get_synthesizer, Synthesizer
+
+# =============================================================================
+# Logging Setup
+# =============================================================================
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("gam-memvid")
 
 
 # =============================================================================
@@ -77,6 +93,13 @@ class SearchRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=50, description="Maximum results")
 
 
+class MemvidSearchRequest(BaseModel):
+    """Request to search memories (memvid endpoint)."""
+    query: str = Field(..., description="Search query")
+    limit: int = Field(default=10, ge=1, le=50, description="Maximum results")
+    model_id: Optional[str] = Field(default=None, description="Model/persona identifier")
+
+
 class SearchResponse(BaseModel):
     """Response from searching memories."""
     results: List[dict]
@@ -100,8 +123,6 @@ class DeleteResponse(BaseModel):
 # Shared Instances
 # =============================================================================
 
-# These are initialized at module load time
-# VaultManager handles per-model vault isolation
 _vault_manager = None
 _synthesizer = None
 
@@ -123,35 +144,191 @@ def get_synth():
 
 
 # =============================================================================
+# Super-Index Hydration Helper
+# =============================================================================
+
+def hydrate_pearl(raw_pearl: Any) -> dict:
+    """
+    Convert a low-level Memvid/store hit into a client-friendly Pearl dict.
+
+    Super-Index Architecture:
+    - text field contains a compact fingerprint (for search)
+    - metadata.full_payload contains {"user": "...", "ai": "..."} with full content
+
+    This function "hydrates" the pearl by extracting the full conversation
+    from full_payload if available, otherwise falls back to text field.
+
+    Args:
+        raw_pearl: Could be a Pearl object, SearchResult, dict, or raw Memvid hit
+
+    Returns:
+        A flat dictionary safe for JSON serialization
+    """
+    # Handle None
+    if raw_pearl is None:
+        return {
+            "id": None,
+            "text": "",
+            "user_message": "",
+            "ai_response": "",
+            "content": "",
+            "metadata": {},
+            "score": 0.0,
+            "tags": [],
+            "created_at": None,
+            "category": "context",
+            "importance": "normal",
+            "status": "active"
+        }
+
+    # Extract fields - handle both object and dict access
+    def safe_get(obj, key, default=None):
+        """Safely get attribute or dict key."""
+        if obj is None:
+            return default
+        if hasattr(obj, key):
+            val = getattr(obj, key, default)
+            return val if val is not None else default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return default
+
+    # Check if this is a SearchResult with nested pearl
+    pearl_obj = safe_get(raw_pearl, "pearl", raw_pearl)
+    score = safe_get(raw_pearl, "score", 0.0)
+
+    # Get metadata - could be on pearl or raw_pearl
+    metadata = safe_get(pearl_obj, "metadata") or safe_get(raw_pearl, "metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    # Get text field (fingerprint in Super-Index)
+    text = safe_get(pearl_obj, "text") or safe_get(raw_pearl, "text") or ""
+
+    # Try to get user_message and ai_response directly first (Pearl objects have these)
+    user_message = safe_get(pearl_obj, "user_message") or ""
+    ai_response = safe_get(pearl_obj, "ai_response") or ""
+
+    # If not found directly, try to extract from full_payload in metadata
+    full_payload = metadata.get("full_payload")
+    if isinstance(full_payload, dict):
+        if not user_message:
+            user_message = full_payload.get("user", "")
+        if not ai_response:
+            ai_response = full_payload.get("ai", "")
+
+    # Also check payload_user/payload_ai format
+    if not user_message:
+        user_message = metadata.get("payload_user", "")
+    if not ai_response:
+        ai_response = metadata.get("payload_ai", "")
+
+    # Build hydrated text - full conversation if available, else fingerprint
+    if user_message or ai_response:
+        hydrated_text = f"User: {user_message}\n\nAI: {ai_response}"
+    else:
+        hydrated_text = text or ""
+
+    # Build combined content
+    if user_message and ai_response:
+        content = f"User: {user_message}\n\nAI: {ai_response}"
+    elif user_message:
+        content = f"User: {user_message}"
+    elif ai_response:
+        content = f"AI: {ai_response}"
+    else:
+        content = hydrated_text
+
+    # Extract other fields
+    pearl_id = (
+        safe_get(pearl_obj, "id") or
+        safe_get(pearl_obj, "pearl_id") or
+        safe_get(raw_pearl, "id") or
+        safe_get(raw_pearl, "pearl_id") or
+        metadata.get("pearl_id") or
+        metadata.get("id")
+    )
+
+    tags = (
+        safe_get(pearl_obj, "tags") or
+        safe_get(raw_pearl, "tags") or
+        metadata.get("tags") or
+        []
+    )
+    if not isinstance(tags, list):
+        tags = []
+
+    created_at = (
+        safe_get(pearl_obj, "created_at") or
+        safe_get(raw_pearl, "created_at") or
+        metadata.get("created_at")
+    )
+
+    category = (
+        safe_get(pearl_obj, "category") or
+        safe_get(raw_pearl, "category") or
+        metadata.get("category") or
+        "context"
+    )
+
+    importance = (
+        safe_get(pearl_obj, "importance") or
+        safe_get(raw_pearl, "importance") or
+        metadata.get("importance") or
+        "normal"
+    )
+
+    status = (
+        safe_get(pearl_obj, "status") or
+        safe_get(raw_pearl, "status") or
+        metadata.get("status") or
+        "active"
+    )
+
+    return {
+        "id": pearl_id,
+        "text": hydrated_text,
+        "user_message": user_message,
+        "ai_response": ai_response,
+        "content": content,
+        "metadata": metadata,
+        "score": float(score) if score else 0.0,
+        "tags": tags,
+        "created_at": created_at,
+        "category": category,
+        "importance": importance,
+        "status": status
+    }
+
+
+# =============================================================================
 # Lifespan Handler
 # =============================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown logic."""
-    # Validate config on startup
     errors = config.validate()
     if errors:
-        print("=" * 60)
-        print("Configuration errors:")
+        logger.warning("=" * 60)
+        logger.warning("Configuration errors:")
         for error in errors:
-            print(f"  - {error}")
-        print("\nCopy .env.example to .env and configure it.")
-        print("=" * 60)
+            logger.warning(f"  - {error}")
+        logger.warning("Copy .env.example to .env and configure it.")
+        logger.warning("=" * 60)
     else:
-        print("=" * 60)
-        print("GAM-Memvid Librarian Server")
-        print("=" * 60)
-        print(f"Host: {config.HOST}:{config.PORT}")
-        print(f"Vaults directory: {config.VAULTS_DIR}")
-        print(f"Embedding model: {config.MEMVID_EMBEDDING_MODEL}")
-        print(f"OpenAI configured: {'Yes' if config.OPENAI_API_KEY else 'No'}")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("GAM-Memvid Librarian Server (Smart Server)")
+        logger.info("=" * 60)
+        logger.info(f"Host: {config.HOST}:{config.PORT}")
+        logger.info(f"Vaults directory: {config.VAULTS_DIR}")
+        logger.info(f"Embedding model: {config.MEMVID_EMBEDDING_MODEL}")
+        logger.info(f"OpenAI configured: {'Yes' if config.OPENAI_API_KEY else 'No'}")
+        logger.info("=" * 60)
 
     yield
 
-    # Cleanup on shutdown
-    print("[Server] Shutting down...")
+    logger.info("[Server] Shutting down...")
     if _vault_manager:
         _vault_manager.close_all()
 
@@ -163,14 +340,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="GAM-Memvid Librarian Server",
     description="AI memory system with Memvid storage and runtime synthesis",
-    version="2.1.0",
+    version="2.2.0",
     lifespan=lifespan
 )
 
 # CORS for OpenWebUI access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -186,11 +363,78 @@ async def health_check():
     """Health check endpoint for Railway."""
     vault_mgr = get_vault_mgr()
     return {
-        "status": "ok",
+        "status": "healthy",
+        "version": "2.2.0",
         "timestamp": datetime.now().isoformat(),
         "vault_files": len(vault_mgr.get_all_vault_files()),
         "active_connections": len(vault_mgr.list_models())
     }
+
+
+# =============================================================================
+# Memvid Endpoints (Dashboard & Valve)
+# =============================================================================
+
+@app.get("/memvid/vaults")
+async def list_vaults():
+    """
+    List all available vault files.
+
+    Scans the vaults directory for .mv2 files.
+    Used by the dashboard to populate the vault selector.
+    """
+    try:
+        vaults_dir = Path(config.VAULTS_DIR)
+        if not vaults_dir.exists():
+            return {"vaults": []}
+
+        vault_files = [f.name for f in vaults_dir.glob("*.mv2")]
+        return {"vaults": vault_files}
+
+    except Exception as e:
+        logger.exception("Error listing vaults")
+        raise HTTPException(status_code=500, detail="Failed to list vaults")
+
+
+@app.post("/memvid/search")
+async def memvid_search(request: MemvidSearchRequest):
+    """
+    Search memories across vault(s).
+
+    This endpoint is used by the Chat Valve and Dashboard.
+    Returns hydrated Pearls with full conversation text.
+    """
+    try:
+        vault_mgr = get_vault_mgr()
+
+        # If no model_id specified, search first available vault
+        model_id = request.model_id
+        if not model_id:
+            vault_files = vault_mgr.get_all_vault_files()
+            if not vault_files:
+                return {"items": [], "count": 0}
+            model_id = vault_files[0].replace(".mv2", "")
+
+        store = vault_mgr.get_store(model_id)
+
+        # Search for pearls
+        results = store.search_pearls(
+            query=request.query,
+            limit=request.limit
+        )
+
+        # Hydrate all results
+        hydrated = [hydrate_pearl(r) for r in results]
+
+        return {
+            "items": hydrated,
+            "count": len(hydrated),
+            "model_id": model_id
+        }
+
+    except Exception as e:
+        logger.exception("Error in memvid_search for query: %s", request.query)
+        raise HTTPException(status_code=500, detail="Search failed")
 
 
 # =============================================================================
@@ -202,8 +446,7 @@ async def add_pearl(request: AddPearlRequest):
     """
     Store a new Pearl (conversation exchange).
 
-    This is called by OpenWebUI's outlet() after each turn.
-    The full user message and AI response are stored without truncation.
+    Called by OpenWebUI's outlet() after each turn.
     """
     try:
         vault_mgr = get_vault_mgr()
@@ -216,7 +459,7 @@ async def add_pearl(request: AddPearlRequest):
             category=request.category or "context",
             importance=request.importance or "normal",
             user_name=request.user_name or "User",
-            created_at=request.created_at  # Preserve original timestamp for imports
+            created_at=request.created_at
         )
 
         word_count = len(request.user_message.split()) + len(request.ai_response.split())
@@ -228,7 +471,7 @@ async def add_pearl(request: AddPearlRequest):
         )
 
     except Exception as e:
-        print(f"[Server] Error adding Pearl: {e}")
+        logger.exception("Error adding Pearl to model %s", request.model_id)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -237,17 +480,14 @@ async def get_context(request: ContextRequest):
     """
     Get synthesized context for prompt injection.
 
-    This is called by OpenWebUI's inlet() before each turn.
-    It retrieves relevant Pearls and synthesizes them into a context string.
+    Called by OpenWebUI's inlet() before each turn.
     """
     try:
         vault_mgr = get_vault_mgr()
         synthesizer = get_synth()
 
-        # Get the store for this model
         store = vault_mgr.get_store(request.model_id)
 
-        # Search for relevant Pearls
         pearls = store.get_raw_pearls_for_synthesis(
             query=request.query,
             limit=request.limit or 5
@@ -260,7 +500,6 @@ async def get_context(request: ContextRequest):
                 has_memories=False
             )
 
-        # Synthesize into context
         context = await synthesizer.synthesize_for_context(
             pearls=pearls,
             user_name=request.user_name or "User",
@@ -274,7 +513,7 @@ async def get_context(request: ContextRequest):
         )
 
     except Exception as e:
-        print(f"[Server] Error getting context: {e}")
+        logger.exception("Error getting context for model %s", request.model_id)
         # Fail open - return empty context rather than error
         return ContextResponse(
             context="",
@@ -295,30 +534,16 @@ async def search_memories(request: SearchRequest):
             limit=request.limit
         )
 
-        # Flatten results for dashboard compatibility
-        flat_results = []
-        for r in results:
-            flat_results.append({
-                "id": r.pearl.id,
-                "user_message": r.pearl.user_message,
-                "ai_response": r.pearl.ai_response,
-                "content": r.pearl.full_content,  # Combined content
-                "category": r.pearl.category,
-                "importance": r.pearl.importance,
-                "tags": r.pearl.tags,
-                "created_at": r.pearl.created_at,
-                "status": r.pearl.status,
-                "score": r.score,
-                "preview": r.preview
-            })
+        # Hydrate all results for dashboard compatibility
+        hydrated = [hydrate_pearl(r) for r in results]
 
         return SearchResponse(
-            results=flat_results,
-            count=len(results)
+            results=hydrated,
+            count=len(hydrated)
         )
 
     except Exception as e:
-        print(f"[Server] Error searching: {e}")
+        logger.exception("Error searching model %s", request.model_id)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -341,7 +566,7 @@ async def delete_pearl(model_id: str, request: DeleteRequest):
         )
 
     except Exception as e:
-        print(f"[Server] Error deleting Pearl: {e}")
+        logger.exception("Error deleting Pearl %s from model %s", request.pearl_id, model_id)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -352,15 +577,18 @@ async def delete_pearl(model_id: str, request: DeleteRequest):
 @app.get("/models")
 async def list_models():
     """List all models with vaults."""
-    vault_mgr = get_vault_mgr()
-    vault_files = vault_mgr.get_all_vault_files()
-    # Return model IDs (strip .mv2 extension)
-    model_ids = [f.replace(".mv2", "") for f in vault_files]
-    return {
-        "models": model_ids,  # Dashboard expects this key
-        "active_models": vault_mgr.list_models(),
-        "all_vault_files": vault_files
-    }
+    try:
+        vault_mgr = get_vault_mgr()
+        vault_files = vault_mgr.get_all_vault_files()
+        model_ids = [f.replace(".mv2", "") for f in vault_files]
+        return {
+            "models": model_ids,
+            "active_models": vault_mgr.list_models(),
+            "all_vault_files": vault_files
+        }
+    except Exception as e:
+        logger.exception("Error listing models")
+        return {"models": [], "active_models": [], "all_vault_files": []}
 
 
 @app.get("/memory/{model_id}/stats")
@@ -371,7 +599,8 @@ async def get_model_stats(model_id: str):
         store = vault_mgr.get_store(model_id)
         return store.get_stats()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Error getting stats for model %s", model_id)
+        raise HTTPException(status_code=500, detail="Failed to get vault statistics")
 
 
 @app.get("/memory/{model_id}/export")
@@ -382,48 +611,57 @@ async def export_model(model_id: str):
         store = vault_mgr.get_store(model_id)
         return store.export()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Error exporting model %s", model_id)
+        raise HTTPException(status_code=500, detail="Failed to export vault")
 
 
 @app.get("/memory/{model_id}/recent")
 async def get_recent_memories(
     model_id: str,
-    limit: int = Query(default=10, ge=1, le=50)
+    limit: int = Query(default=20, ge=1, le=100)
 ):
-    """Get most recent memories for a model."""
+    """
+    Get most recent memories for a model.
+
+    Returns hydrated Pearls with full conversation text.
+    """
     try:
         vault_mgr = get_vault_mgr()
         store = vault_mgr.get_store(model_id)
-        memories = store.get_recent(limit=limit)
 
-        # Flatten for dashboard compatibility
-        flat_memories = []
-        for m in memories:
-            flat_memories.append({
-                "id": m.id,
-                "user_message": m.user_message,
-                "ai_response": m.ai_response,
-                "content": m.full_content,
-                "category": m.category,
-                "importance": m.importance,
-                "tags": m.tags,
-                "created_at": m.created_at,
-                "status": m.status
-            })
+        # Try to get recent pearls
+        try:
+            memories = store.get_recent(limit=limit)
+        except AttributeError:
+            # Fallback: search with broad query
+            logger.warning("get_recent not available, using search fallback")
+            results = store.search_pearls(query="*", limit=limit)
+            memories = [r.pearl if hasattr(r, 'pearl') else r for r in results]
+
+        # Hydrate all results
+        hydrated = [hydrate_pearl(m) for m in memories]
+
+        # Sort by created_at (most recent first)
+        hydrated.sort(key=lambda x: x.get("created_at") or "", reverse=True)
 
         return {
             "model_id": model_id,
-            "count": len(memories),
-            "memories": flat_memories
+            "count": len(hydrated),
+            "memories": hydrated,
+            "items": hydrated  # Alias for compatibility
         }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Error getting recent memories for model %s", model_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load recent memories: {str(e)}"
+        )
 
 
 # =============================================================================
 # Legacy Compatibility Endpoints
 # =============================================================================
-# These maintain backward compatibility with the old memory_manager API
 
 class LegacyAddRequest(BaseModel):
     """Legacy request format for adding memory."""
@@ -439,16 +677,11 @@ class LegacyAddRequest(BaseModel):
 
 @app.post("/memory/add/legacy")
 async def add_memory_legacy(request: LegacyAddRequest):
-    """
-    Legacy endpoint for backward compatibility.
-
-    Converts the old content-based format to Pearl format.
-    """
+    """Legacy endpoint for backward compatibility."""
     try:
         vault_mgr = get_vault_mgr()
         store = vault_mgr.get_store(request.model_id)
 
-        # Parse content into user/AI parts if possible
         user_message = request.content
         ai_response = ""
 
@@ -475,10 +708,10 @@ async def add_memory_legacy(request: LegacyAddRequest):
         }
 
     except Exception as e:
+        logger.exception("Error in legacy add for model %s", request.model_id)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Alias the legacy endpoint path
 @app.post("/memory/add/v1")
 async def add_memory_v1(request: LegacyAddRequest):
     """Alias for legacy add endpoint."""
@@ -492,7 +725,6 @@ async def add_memory_v1(request: LegacyAddRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    # Get port from environment (Railway sets this)
     port = int(os.getenv("PORT", config.PORT))
     host = os.getenv("HOST", config.HOST)
 
