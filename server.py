@@ -26,6 +26,7 @@ Endpoints:
 """
 import os
 import re
+import html
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -292,10 +293,12 @@ def hydrate_pearl(raw_pearl: Any) -> dict:
     if not isinstance(tags, list):
         tags = []
 
+    # PRIORITY: Get created_at from metadata first (preserves original timestamp from import)
+    # Then fall back to object attributes
     created_at = (
+        metadata.get("created_at") or
         safe_get(pearl_obj, "created_at") or
-        safe_get(raw_pearl, "created_at") or
-        metadata.get("created_at")
+        safe_get(raw_pearl, "created_at")
     )
 
     category = (
@@ -367,6 +370,17 @@ def hydrate_pearl(raw_pearl: Any) -> dict:
         logger.warning(f"HYDRATE WARNING: Both user_message and ai_response are EMPTY for pearl_id={pearl_id}")
         logger.warning(f"  -> text field was: {text[:200] if text else 'EMPTY'}")
         logger.warning(f"  -> full_payload was: {full_payload}")
+
+    # Decode HTML entities in text fields (e.g., &gt; -> >, &quot; -> ", &#x27; -> ')
+    # This ensures the dashboard displays text as it appeared in original conversations
+    if user_message:
+        user_message = html.unescape(user_message)
+    if ai_response:
+        ai_response = html.unescape(ai_response)
+    if hydrated_text:
+        hydrated_text = html.unescape(hydrated_text)
+    if content:
+        content = html.unescape(content)
 
     result = {
         "id": pearl_id,
