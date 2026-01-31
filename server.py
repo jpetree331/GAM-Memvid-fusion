@@ -25,6 +25,7 @@ Endpoints:
 - POST /memory/{model_id}/delete - Soft delete a Pearl
 """
 import os
+import re
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -312,7 +313,50 @@ def hydrate_pearl(raw_pearl: Any) -> dict:
         "active"
     )
 
-    # Log warning if both user_message and ai_response are empty
+    # If both user_message and ai_response are empty, try to parse from text field
+    # The text field often contains "User: {message}\n\nAI: {response}" format
+    if not user_message and not ai_response and text:
+        logger.debug(f"  Attempting to parse user_message/ai_response from text field...")
+
+        # Try "User: ...\n\nAI: ..." format (double newline separator)
+        if "\n\nAI:" in text or "\nAI:" in text:
+            # Split on AI: (with newline prefix)
+            separator = "\n\nAI:" if "\n\nAI:" in text else "\nAI:"
+            parts = text.split(separator, 1)
+            if len(parts) == 2:
+                # Extract user message (remove "User:" prefix if present)
+                user_part = parts[0].strip()
+                if user_part.startswith("User:"):
+                    user_part = user_part[5:].strip()
+                user_message = user_part
+
+                # Extract AI response
+                ai_response = parts[1].strip()
+
+                logger.debug(f"  PARSED from text - user_message (first 100): {user_message[:100] if user_message else 'EMPTY'}")
+                logger.debug(f"  PARSED from text - ai_response (first 100): {ai_response[:100] if ai_response else 'EMPTY'}")
+
+        # Also try "User: ...\nAI: ..." format (single newline)
+        elif "User:" in text and "AI:" in text:
+            match = re.match(r'User:\s*(.+?)\s*AI:\s*(.+)', text, re.DOTALL)
+            if match:
+                user_message = match.group(1).strip()
+                ai_response = match.group(2).strip()
+                logger.debug(f"  PARSED (regex) from text - user_message (first 100): {user_message[:100] if user_message else 'EMPTY'}")
+                logger.debug(f"  PARSED (regex) from text - ai_response (first 100): {ai_response[:100] if ai_response else 'EMPTY'}")
+
+        # Rebuild hydrated_text and content if we successfully parsed
+        if user_message or ai_response:
+            hydrated_text = f"User: {user_message}\n\nAI: {ai_response}"
+            if user_message and ai_response:
+                content = f"User: {user_message}\n\nAI: {ai_response}"
+            elif user_message:
+                content = f"User: {user_message}"
+            else:
+                content = f"AI: {ai_response}"
+            logger.debug(f"  REBUILT hydrated_text and content from parsed values")
+
+    # Log warning if STILL both are empty after parsing attempts
     if not user_message and not ai_response:
         logger.warning(f"HYDRATE WARNING: Both user_message and ai_response are EMPTY for pearl_id={pearl_id}")
         logger.warning(f"  -> text field was: {text[:200] if text else 'EMPTY'}")
@@ -491,6 +535,14 @@ async def add_pearl(request: AddPearlRequest):
     Called by OpenWebUI's outlet() after each turn.
     """
     try:
+        logger.info(f"POST /memory/add for model={request.model_id}")
+        logger.debug(f"  user_message length: {len(request.user_message)}")
+        logger.debug(f"  ai_response length: {len(request.ai_response)}")
+        logger.debug(f"  user_message (first 100): {request.user_message[:100] if request.user_message else 'EMPTY'}")
+        logger.debug(f"  ai_response (first 100): {request.ai_response[:100] if request.ai_response else 'EMPTY'}")
+        logger.debug(f"  tags: {request.tags}")
+        logger.debug(f"  created_at: {request.created_at}")
+
         vault_mgr = get_vault_mgr()
         store = vault_mgr.get_store(request.model_id)
 
@@ -505,6 +557,8 @@ async def add_pearl(request: AddPearlRequest):
         )
 
         word_count = len(request.user_message.split()) + len(request.ai_response.split())
+
+        logger.info(f"  -> Stored Pearl {pearl_id}, {word_count} words")
 
         return AddPearlResponse(
             pearl_id=pearl_id,
@@ -655,6 +709,58 @@ async def export_model(model_id: str):
     except Exception as e:
         logger.exception("Error exporting model %s", model_id)
         raise HTTPException(status_code=500, detail="Failed to export vault")
+
+
+@app.get("/memory/{model_id}/debug-raw")
+async def debug_raw_vault(model_id: str, limit: int = 3):
+    """
+    DEBUG ENDPOINT: Show raw Memvid SDK output for diagnosing storage issues.
+
+    This bypasses hydration to show exactly what the SDK returns.
+    """
+    try:
+        vault_mgr = get_vault_mgr()
+        store = vault_mgr.get_store(model_id)
+
+        # Get raw hits from SDK
+        raw_results = []
+
+        # Try to get raw data from the internal _mv object
+        if hasattr(store, '_mv') and store._mv:
+            mv = store._mv
+
+            # Try find() with empty query
+            try:
+                result = mv.find("", k=limit, mode="lex")
+                logger.info(f"Raw find() result type: {type(result)}")
+                logger.info(f"Raw find() result: {str(result)[:1000]}")
+
+                if isinstance(result, dict):
+                    hits = result.get("hits", [])
+                    for i, hit in enumerate(hits[:limit]):
+                        raw_results.append({
+                            "index": i,
+                            "type": type(hit).__name__,
+                            "keys": list(hit.keys()) if isinstance(hit, dict) else "N/A",
+                            "text_preview": str(hit.get("text", ""))[:200] if isinstance(hit, dict) else "N/A",
+                            "metadata_type": type(hit.get("metadata")).__name__ if isinstance(hit, dict) else "N/A",
+                            "metadata_keys": list(hit.get("metadata", {}).keys()) if isinstance(hit, dict) and isinstance(hit.get("metadata"), dict) else "N/A",
+                            "metadata_preview": str(hit.get("metadata", ""))[:500] if isinstance(hit, dict) else "N/A",
+                            "full_hit": str(hit)[:1000]
+                        })
+            except Exception as e:
+                raw_results.append({"error": f"find() failed: {str(e)}"})
+
+        return {
+            "model_id": model_id,
+            "store_type": type(store).__name__,
+            "has_mv": hasattr(store, '_mv') and store._mv is not None,
+            "raw_hits": raw_results
+        }
+
+    except Exception as e:
+        logger.exception("Error in debug-raw for model %s", model_id)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/memory/{model_id}/recent")
