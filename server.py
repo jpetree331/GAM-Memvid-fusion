@@ -583,22 +583,21 @@ async def add_pearl(request: AddPearlRequest):
     try:
         # DEBUG: Log ALL request fields to see exactly what Pydantic parsed
         logger.info(f"POST /memory/add for model={request.model_id}")
-        logger.info(f"  REQUEST DUMP: model_id={request.model_id!r}")
-        logger.info(f"  REQUEST DUMP: created_at={request.created_at!r} (type={type(request.created_at).__name__})")
-        logger.info(f"  REQUEST DUMP: tags={request.tags!r}")
-        logger.info(f"  REQUEST DUMP: category={request.category!r}")
-        logger.info(f"  REQUEST DUMP: importance={request.importance!r}")
-        logger.info(f"  REQUEST DUMP: user_name={request.user_name!r}")
+        logger.info(f"[TIMESTAMP DEBUG] ============================================")
+        logger.info(f"[TIMESTAMP DEBUG] request.created_at = {request.created_at!r}")
+        logger.info(f"[TIMESTAMP DEBUG] type = {type(request.created_at).__name__}")
+        logger.info(f"[TIMESTAMP DEBUG] bool(request.created_at) = {bool(request.created_at)}")
+        logger.info(f"[TIMESTAMP DEBUG] ============================================")
+        logger.debug(f"  REQUEST DUMP: tags={request.tags!r}")
+        logger.debug(f"  REQUEST DUMP: category={request.category!r}")
         logger.debug(f"  user_message length: {len(request.user_message)}")
-        logger.debug(f"  ai_response length: {len(request.ai_response)}")
 
         vault_mgr = get_vault_mgr()
         store = vault_mgr.get_store(request.model_id)
 
-        # Pass created_at explicitly - DO NOT default to None, keep the value!
-        # The issue was: if created_at is a valid string, pass it through
-        effective_created_at = request.created_at  # Pass through as-is, let add_pearl handle None
-        logger.info(f"  Passing to add_pearl: created_at={effective_created_at!r}")
+        # Pass created_at through - MUST preserve the original timestamp!
+        created_at_to_pass = request.created_at
+        logger.info(f"[TIMESTAMP DEBUG] Passing to store.add_pearl: created_at={created_at_to_pass!r}")
 
         pearl_id = store.add_pearl(
             user_message=request.user_message,
@@ -607,7 +606,7 @@ async def add_pearl(request: AddPearlRequest):
             category=request.category or "context",
             importance=request.importance or "normal",
             user_name=request.user_name or "User",
-            created_at=effective_created_at
+            created_at=created_at_to_pass  # Use the preserved timestamp!
         )
 
         word_count = len(request.user_message.split()) + len(request.ai_response.split())

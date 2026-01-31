@@ -552,10 +552,15 @@ class Pearl:
                         tags.append(tag)
 
         # DEBUG: Log what created_at value we're reading from metadata
-        stored_created_at = meta.get("created_at")
+        print(f"[TIMESTAMP DEBUG] ============================================")
+        print(f"[TIMESTAMP DEBUG] from_memvid_hit - RAW metadata: {meta!r}")
+        print(f"[TIMESTAMP DEBUG] from_memvid_hit - metadata type: {type(meta).__name__}")
+        print(f"[TIMESTAMP DEBUG] from_memvid_hit - metadata keys: {list(meta.keys()) if isinstance(meta, dict) else 'NOT A DICT'}")
+        stored_created_at = meta.get("created_at") if isinstance(meta, dict) else None
         effective_created_at = stored_created_at if stored_created_at else datetime.now().isoformat()
-        print(f"[Librarian DEBUG] from_memvid_hit - metadata.created_at: {stored_created_at!r}")
-        print(f"[Librarian DEBUG] from_memvid_hit - using: {effective_created_at}")
+        print(f"[TIMESTAMP DEBUG] from_memvid_hit - stored created_at: {stored_created_at!r}")
+        print(f"[TIMESTAMP DEBUG] from_memvid_hit - using: {effective_created_at!r}")
+        print(f"[TIMESTAMP DEBUG] ============================================")
 
         return cls(
             id=hit_dict.get("frame_id", hit_dict.get("title", "")),
@@ -782,8 +787,9 @@ class MemvidStore:
 
         # DEBUG: Log the created_at value being used
         effective_created_at = created_at if created_at else datetime.now().isoformat()
-        print(f"[Librarian DEBUG] add_pearl called with created_at={created_at!r}")
-        print(f"[Librarian DEBUG] Using effective_created_at={effective_created_at}")
+        print(f"[TIMESTAMP DEBUG] ============================================")
+        print(f"[TIMESTAMP DEBUG] add_pearl received created_at param: {created_at!r}")
+        print(f"[TIMESTAMP DEBUG] effective_created_at will be: {effective_created_at!r}")
 
         pearl = Pearl(
             id=pearl_id,
@@ -801,6 +807,8 @@ class MemvidStore:
             model_id=self.model_id
         )
 
+        print(f"[TIMESTAMP DEBUG] Pearl object created_at: {pearl.created_at!r}")
+
         # === SUPER-INDEX: Build fingerprint for vector search ===
         # The fingerprint is compact enough for embedding models
         # Full content is stored in metadata.full_payload
@@ -809,13 +817,19 @@ class MemvidStore:
         if _DEBUG_SDK_TYPES:
             print(f"[Librarian] Fingerprint: {len(fingerprint)} chars (original: {pearl.word_count} words)")
 
+        # Get metadata and verify created_at is included
+        metadata_to_store = pearl.get_metadata()
+        print(f"[TIMESTAMP DEBUG] Metadata to store - created_at: {metadata_to_store.get('created_at')!r}")
+        print(f"[TIMESTAMP DEBUG] Metadata keys: {list(metadata_to_store.keys())}")
+        print(f"[TIMESTAMP DEBUG] ============================================")
+
         # Store in Memvid
         # - text: fingerprint (for embedding/search)
         # - metadata: full_payload + indexing metadata (for retrieval)
         self._mv.put(
             title=pearl.id,
             label=pearl.get_label(),
-            metadata=pearl.get_metadata(),  # Contains full_payload with complete text
+            metadata=metadata_to_store,
             text=fingerprint  # Compact fingerprint for embedding
         )
 
