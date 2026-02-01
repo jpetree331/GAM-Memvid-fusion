@@ -26,7 +26,7 @@ Each AI model (persona) gets its own isolated .mv2 vault file.
 import os
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -594,56 +594,78 @@ class Pearl:
                     if tag and tag not in tags:
                         tags.append(tag)
 
-        # DEBUG: Log what created_at value we're reading from metadata
-        print(f"[TIMESTAMP DEBUG] ============================================")
-        print(f"[TIMESTAMP DEBUG] from_memvid_hit - RAW metadata: {meta!r}")
-        print(f"[TIMESTAMP DEBUG] from_memvid_hit - metadata type: {type(meta).__name__}")
-        print(f"[TIMESTAMP DEBUG] from_memvid_hit - metadata keys: {list(meta.keys()) if isinstance(meta, dict) else 'NOT A DICT'}")
+        # CRITICAL FIX: Read timestamp from Frame's timestamp field
+        # The SDK stores the timestamp we passed via the timestamp parameter in the Frame's timestamp field
+        # This is a Unix timestamp (int), so we need to convert it back to ISO format
+        stored_timestamp = None
+        stored_created_at_iso = None
         
-        # CRITICAL INVESTIGATION #1: Check top-level created_at in hit_dict
-        # The logs show 'created_at' is in hit_dict.keys(), so check it directly
-        top_level_created_at = hit_dict.get("created_at")
-        print(f"[INVESTIGATION #1] hit_dict.get('created_at') = {top_level_created_at!r}")
-        print(f"[INVESTIGATION #1] Type: {type(top_level_created_at).__name__ if top_level_created_at is not None else 'None'}")
-        
-        # Also check all top-level fields that might contain timestamp
-        print(f"[INVESTIGATION #1] All hit_dict keys: {list(hit_dict.keys())}")
-        for key in ['created_at', 'timestamp', 'date', 'createdAt', 'created_date']:
-            if key in hit_dict:
-                print(f"[INVESTIGATION #1] hit_dict['{key}'] = {hit_dict[key]!r}")
-        
-        # Try to get created_at from multiple sources
-        stored_created_at = None
-        
-        # Method 1: From top-level hit_dict (CRITICAL - this is what we're investigating)
-        if top_level_created_at is not None:
-            stored_created_at = top_level_created_at
-            print(f"[INVESTIGATION #1] ✓ FOUND created_at at top level: {stored_created_at!r}")
-        
-        # Method 2: From metadata dict (currently empty, but check anyway)
-        if stored_created_at is None and isinstance(meta, dict):
-            stored_created_at = meta.get("created_at")
-            if stored_created_at:
-                print(f"[INVESTIGATION #1] Found created_at in metadata dict: {stored_created_at!r}")
-        
-        # Method 3: Direct attribute on hit object
-        if stored_created_at is None and hasattr(hit, 'created_at'):
-            stored_created_at = getattr(hit, 'created_at', None)
-            if stored_created_at:
-                print(f"[INVESTIGATION #1] Found created_at in hit.created_at attribute: {stored_created_at!r}")
-        
-        effective_created_at = stored_created_at if stored_created_at else datetime.now().isoformat()
-        print(f"[TIMESTAMP DEBUG] from_memvid_hit - stored created_at: {stored_created_at!r}")
-        print(f"[TIMESTAMP DEBUG] from_memvid_hit - using: {effective_created_at!r}")
-        print(f"[TIMESTAMP DEBUG] ============================================")
-        
-        # INVESTIGATION RESULT
-        if top_level_created_at is not None:
-            print(f"[INVESTIGATION #1 RESULT] ✓ YES - created_at found at top level: {top_level_created_at!r}")
-            print(f"[INVESTIGATION #1 RESULT] This matches Hypothesis A: SDK stores created_at separately from metadata dict")
-        else:
-            print(f"[INVESTIGATION #1 RESULT] ✗ NO - created_at NOT found at top level")
-            print(f"[INVESTIGATION #1 RESULT] Continue to Investigation #2")
+        try:
+            # Method 1: Read from Frame's timestamp field (top-level in hit_dict)
+            # This is the primary source - the timestamp we passed via put(timestamp=...)
+            frame_timestamp = hit_dict.get("timestamp")
+            if frame_timestamp is not None:
+                try:
+                    # Convert Unix timestamp (int) to ISO string
+                    if isinstance(frame_timestamp, (int, float)):
+                        dt = datetime.fromtimestamp(frame_timestamp, tz=timezone.utc)
+                        stored_created_at_iso = dt.isoformat()
+                        stored_timestamp = frame_timestamp
+                        print(f"[TIMESTAMP FIX] ✓ Found Frame timestamp: {frame_timestamp} -> ISO: {stored_created_at_iso}")
+                    elif isinstance(frame_timestamp, str):
+                        # Might already be ISO string
+                        stored_created_at_iso = frame_timestamp
+                        print(f"[TIMESTAMP FIX] Found Frame timestamp as string: {stored_created_at_iso}")
+                except (ValueError, OSError, TypeError) as e:
+                    print(f"[TIMESTAMP FIX] WARNING: Failed to convert timestamp {frame_timestamp!r}: {e}")
+            
+            # Method 2: Fallback to created_at field (for backward compatibility with old data)
+            if stored_created_at_iso is None:
+                created_at_value = hit_dict.get("created_at")
+                if created_at_value is not None:
+                    if isinstance(created_at_value, (int, float)):
+                        try:
+                            dt = datetime.fromtimestamp(created_at_value, tz=timezone.utc)
+                            stored_created_at_iso = dt.isoformat()
+                            print(f"[TIMESTAMP FIX] Found created_at as Unix timestamp: {created_at_value} -> ISO: {stored_created_at_iso}")
+                        except (ValueError, OSError, TypeError):
+                            pass
+                    elif isinstance(created_at_value, str):
+                        stored_created_at_iso = created_at_value
+                        print(f"[TIMESTAMP FIX] Found created_at as string: {stored_created_at_iso}")
+            
+            # Method 3: Check metadata dict (for backward compatibility)
+            if stored_created_at_iso is None and isinstance(meta, dict):
+                meta_created_at = meta.get("created_at")
+                if meta_created_at:
+                    stored_created_at_iso = meta_created_at
+                    print(f"[TIMESTAMP FIX] Found created_at in metadata dict: {stored_created_at_iso}")
+            
+            # Method 4: Direct attribute on hit object
+            if stored_created_at_iso is None and hasattr(hit, 'timestamp'):
+                attr_timestamp = getattr(hit, 'timestamp', None)
+                if attr_timestamp is not None:
+                    try:
+                        if isinstance(attr_timestamp, (int, float)):
+                            dt = datetime.fromtimestamp(attr_timestamp, tz=timezone.utc)
+                            stored_created_at_iso = dt.isoformat()
+                            print(f"[TIMESTAMP FIX] Found timestamp attribute: {attr_timestamp} -> ISO: {stored_created_at_iso}")
+                    except (ValueError, OSError, TypeError):
+                        pass
+            
+            # Final fallback: use current time
+            effective_created_at = stored_created_at_iso if stored_created_at_iso else datetime.now(timezone.utc).isoformat()
+            
+            print(f"[TIMESTAMP FIX] ============================================")
+            print(f"[TIMESTAMP FIX] Frame timestamp (Unix): {stored_timestamp}")
+            print(f"[TIMESTAMP FIX] Effective created_at (ISO): {effective_created_at}")
+            print(f"[TIMESTAMP FIX] ============================================")
+        except Exception as e:
+            # If timestamp parsing fails completely, use current time and log error
+            print(f"[TIMESTAMP FIX] ERROR: Exception during timestamp parsing: {e}")
+            import traceback
+            traceback.print_exc()
+            effective_created_at = datetime.now(timezone.utc).isoformat()
 
         return cls(
             id=hit_dict.get("frame_id", hit_dict.get("title", "")),
@@ -906,22 +928,38 @@ class MemvidStore:
         print(f"[TIMESTAMP DEBUG] Metadata keys: {list(metadata_to_store.keys())}")
         print(f"[TIMESTAMP DEBUG] ============================================")
 
+        # Convert ISO timestamp to Unix timestamp (int) for SDK's timestamp parameter
+        # The SDK's timestamp parameter sets the Frame's top-level timestamp field
+        timestamp_int = None
+        if effective_created_at:
+            try:
+                # Parse ISO string and convert to Unix timestamp
+                dt = datetime.fromisoformat(effective_created_at.replace('Z', '+00:00'))
+                timestamp_int = int(dt.timestamp())
+                print(f"[TIMESTAMP DEBUG] Converted ISO '{effective_created_at}' to Unix timestamp: {timestamp_int}")
+            except (ValueError, AttributeError) as e:
+                print(f"[TIMESTAMP DEBUG] WARNING: Failed to convert timestamp '{effective_created_at}': {e}")
+                print(f"[TIMESTAMP DEBUG] Will use current time instead")
+                timestamp_int = int(datetime.now().timestamp())
+
         # Store in Memvid
         # - text: fingerprint (for embedding/search)
         # - metadata: full_payload + indexing metadata (for retrieval)
+        # - timestamp: Original conversation timestamp (Unix int) - CRITICAL FIX!
         # DEBUG: Verify metadata before storing
         print(f"[TIMESTAMP DEBUG] About to store - metadata type: {type(metadata_to_store).__name__}")
         print(f"[TIMESTAMP DEBUG] About to store - metadata keys: {list(metadata_to_store.keys())}")
-        print(f"[TIMESTAMP DEBUG] About to store - created_at in metadata: {metadata_to_store.get('created_at')!r}")
+        print(f"[TIMESTAMP DEBUG] About to store - timestamp parameter: {timestamp_int}")
         
         self._mv.put(
             title=pearl.id,
             label=pearl.get_label(),
             metadata=metadata_to_store,
-            text=fingerprint  # Compact fingerprint for embedding
+            text=fingerprint,  # Compact fingerprint for embedding
+            timestamp=timestamp_int  # CRITICAL: Pass original timestamp to SDK's timestamp parameter
         )
         
-        print(f"[TIMESTAMP DEBUG] Storage complete for pearl {pearl.id}")
+        print(f"[TIMESTAMP DEBUG] Storage complete for pearl {pearl.id} with timestamp={timestamp_int}")
 
         self._pearl_count += 1
         self._last_update = datetime.now().isoformat()
@@ -941,11 +979,21 @@ class MemvidStore:
         # Build fingerprint for this pearl
         fingerprint = build_fingerprint(pearl.user_message, pearl.ai_response)
 
+        # Convert ISO timestamp to Unix timestamp (int) for SDK's timestamp parameter
+        timestamp_int = None
+        if pearl.created_at:
+            try:
+                dt = datetime.fromisoformat(pearl.created_at.replace('Z', '+00:00'))
+                timestamp_int = int(dt.timestamp())
+            except (ValueError, AttributeError):
+                timestamp_int = int(datetime.now().timestamp())
+
         self._mv.put(
             title=pearl.id,
             label=pearl.get_label(),
             metadata=pearl.get_metadata(),
-            text=fingerprint
+            text=fingerprint,
+            timestamp=timestamp_int  # CRITICAL: Pass original timestamp to SDK's timestamp parameter
         )
 
         self._pearl_count += 1
@@ -962,11 +1010,22 @@ class MemvidStore:
         for pearl in pearls:
             pearl.model_id = self.model_id
             fingerprint = build_fingerprint(pearl.user_message, pearl.ai_response)
+            
+            # Convert ISO timestamp to Unix timestamp (int) for SDK's timestamp parameter
+            timestamp_int = None
+            if pearl.created_at:
+                try:
+                    dt = datetime.fromisoformat(pearl.created_at.replace('Z', '+00:00'))
+                    timestamp_int = int(dt.timestamp())
+                except (ValueError, AttributeError):
+                    timestamp_int = int(datetime.now().timestamp())
+            
             batch.append({
                 "title": pearl.id,
                 "label": pearl.get_label(),
                 "metadata": pearl.get_metadata(),
-                "text": fingerprint  # Use fingerprint, not full_content
+                "text": fingerprint,  # Use fingerprint, not full_content
+                "timestamp": timestamp_int  # CRITICAL: Pass original timestamp
             })
 
         if hasattr(self._mv, 'put_many'):
@@ -1066,6 +1125,9 @@ class MemvidStore:
             # Add a deletion marker frame
             deletion_id = f"delete_{pearl_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+            # Use current time for deletion marker timestamp
+            deletion_timestamp = int(datetime.now().timestamp())
+            
             self._mv.put(
                 title=deletion_id,
                 label=f"deletion_marker|target:{pearl_id}|status:deleted",
@@ -1075,7 +1137,8 @@ class MemvidStore:
                     "deleted_at": datetime.now().isoformat(),
                     "reason": reason or "user_requested"
                 },
-                text=f"DELETION MARKER: Pearl {pearl_id} has been soft-deleted. Reason: {reason or 'user requested'}"
+                text=f"DELETION MARKER: Pearl {pearl_id} has been soft-deleted. Reason: {reason or 'user requested'}",
+                timestamp=deletion_timestamp  # Use current time for deletion marker
             )
 
             print(f"[Librarian] Soft deleted Pearl: {pearl_id}")

@@ -25,7 +25,8 @@ Environment:
 
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Optional, List
 from dataclasses import dataclass
 
@@ -49,11 +50,14 @@ logger = logging.getLogger("dashboard-api")
 
 MEMORY_SERVER_URL = os.getenv(
     "MEMORY_SERVER_URL",
-    "https://gam-memvid-fusion-production.up.railway.app"
+    "http://localhost:8100"  # Default to localhost for local development
 )
 
 # HTTP client timeout
 REQUEST_TIMEOUT = 30.0
+
+# Local timezone for display
+LOCAL_TZ = ZoneInfo("America/New_York")
 
 
 # =============================================================================
@@ -358,13 +362,36 @@ def api_delete_vault(model_id: str) -> dict:
 # =============================================================================
 
 def format_timestamp(ts: Optional[str]) -> str:
-    """Format timestamp for display."""
+    """Format timestamp for display in local time (EST/EDT)."""
     if not ts:
         return "Unknown"
     try:
-        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except:
+        # Handle various timestamp formats
+        ts_clean = ts.strip()
+        
+        # If it's already in format "YYYY-MM-DD HH:MM" (no timezone), assume UTC
+        if len(ts_clean) == 16 and 'T' not in ts_clean and '+' not in ts_clean and 'Z' not in ts_clean:
+            # Format: "2026-01-22 00:59" - assume UTC
+            dt = datetime.strptime(ts_clean, "%Y-%m-%d %H:%M")
+            dt = dt.replace(tzinfo=timezone.utc)  # Mark as UTC
+        elif 'Z' in ts_clean:
+            # ISO format with Z (UTC)
+            dt = datetime.fromisoformat(ts_clean.replace('Z', '+00:00'))
+        elif '+' in ts_clean or ts_clean.count('-') >= 3:
+            # ISO format with timezone offset
+            dt = datetime.fromisoformat(ts_clean)
+        else:
+            # Try parsing as ISO without timezone, assume UTC
+            dt = datetime.fromisoformat(ts_clean)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        
+        # Convert to EST/EDT and format in 12-hour format with AM/PM
+        est_dt = dt.astimezone(LOCAL_TZ)
+        return est_dt.strftime("%Y-%m-%d %I:%M %p")
+    except Exception as e:
+        # Fallback: return original timestamp truncated
+        logger.debug(f"Failed to parse timestamp '{ts}': {e}")
         return ts[:16] if len(ts) > 16 else ts
 
 

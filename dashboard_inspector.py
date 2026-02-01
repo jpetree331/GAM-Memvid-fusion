@@ -26,9 +26,10 @@ Requirements:
 import asyncio
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List
+from zoneinfo import ZoneInfo
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -125,13 +126,39 @@ def get_available_vaults() -> List[str]:
 
 
 def format_timestamp(ts: Optional[str]) -> str:
-    """Format timestamp for display."""
+    """Format timestamp for display in local time (EST/EDT)."""
     if not ts:
         return "Unknown"
+    
+    # Local timezone for display (EST/EDT)
+    LOCAL_TZ = ZoneInfo("America/New_York")
+    
     try:
-        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except:
+        # Handle various timestamp formats
+        ts_clean = ts.strip()
+        
+        # If it's already in format "YYYY-MM-DD HH:MM" (no timezone), assume UTC
+        if len(ts_clean) == 16 and 'T' not in ts_clean and '+' not in ts_clean and 'Z' not in ts_clean:
+            # Format: "2026-01-22 00:59" - assume UTC
+            dt = datetime.strptime(ts_clean, "%Y-%m-%d %H:%M")
+            dt = dt.replace(tzinfo=timezone.utc)  # Mark as UTC
+        elif 'Z' in ts_clean:
+            # ISO format with Z (UTC)
+            dt = datetime.fromisoformat(ts_clean.replace('Z', '+00:00'))
+        elif '+' in ts_clean or ts_clean.count('-') >= 3:
+            # ISO format with timezone offset
+            dt = datetime.fromisoformat(ts_clean)
+        else:
+            # Try parsing as ISO without timezone, assume UTC
+            dt = datetime.fromisoformat(ts_clean)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        
+        # Convert to EST/EDT and format in 12-hour format with AM/PM
+        est_dt = dt.astimezone(LOCAL_TZ)
+        return est_dt.strftime("%Y-%m-%d %I:%M %p")
+    except Exception as e:
+        # Fallback: return original timestamp truncated
         return ts[:16] if len(ts) > 16 else ts
 
 

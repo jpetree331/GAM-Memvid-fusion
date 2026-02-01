@@ -15,8 +15,9 @@ from dataclasses import dataclass
 
 import httpx
 
-# Railway server URL
+# Railway server URL (can be overridden with --local flag)
 RAILWAY_URL = "https://gam-memvid-fusion-production.up.railway.app"
+LOCAL_URL = "http://localhost:8100"
 
 
 @dataclass
@@ -194,20 +195,24 @@ def upload_to_railway(
     pairs: list[MessagePair],
     model_id: str,
     user_name: str = "User",
-    dry_run: bool = False
+    dry_run: bool = False,
+    use_local: bool = False
 ) -> dict:
     """
-    Upload message pairs to Railway server.
+    Upload message pairs to Railway server or local server.
 
     Args:
         pairs: List of user/AI message pairs
         model_id: Target model ID
         user_name: User's name
         dry_run: If True, don't actually upload
+        use_local: If True, use localhost:8100 instead of Railway URL
 
     Returns:
         Upload statistics
     """
+    server_url = LOCAL_URL if use_local else RAILWAY_URL
+    
     stats = {
         "total": len(pairs),
         "uploaded": 0,
@@ -216,7 +221,7 @@ def upload_to_railway(
     }
 
     if dry_run:
-        print(f"\n[DRY RUN] Would upload {len(pairs)} pairs to: {RAILWAY_URL}")
+        print(f"\n[DRY RUN] Would upload {len(pairs)} pairs to: {server_url}")
         print(f"Model ID: {model_id}")
         print(f"User name: {user_name}")
         reasoning_count = sum(1 for p in pairs if p.has_reasoning)
@@ -232,7 +237,7 @@ def upload_to_railway(
             print(f"\n... and {len(pairs) - 3} more")
         return stats
 
-    print(f"\nUploading {len(pairs)} pairs to: {RAILWAY_URL}")
+    print(f"\nUploading {len(pairs)} pairs to: {server_url}")
     print(f"Model ID: {model_id}")
     print(f"User name: {user_name}\n")
 
@@ -259,7 +264,7 @@ def upload_to_railway(
                     print(f"[DEBUG] Pair {i+1}: WARNING - No timestamp available, will use import time")
 
                 response = client.post(
-                    f"{RAILWAY_URL}/memory/add",
+                    f"{server_url}/memory/add",
                     json=payload
                 )
 
@@ -309,6 +314,11 @@ def main():
         action="store_true",
         help="Parse and show what would be uploaded, but don't upload"
     )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Use localhost:8100 instead of Railway URL (for local testing)"
+    )
 
     args = parser.parse_args()
 
@@ -329,7 +339,8 @@ def main():
         pairs=pairs,
         model_id=args.model_id,
         user_name=args.user_name,
-        dry_run=args.dry_run
+        dry_run=args.dry_run,
+        use_local=args.local
     )
 
     # Summary
