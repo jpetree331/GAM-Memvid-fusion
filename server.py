@@ -1214,11 +1214,11 @@ async def continuum_journal_trigger(
         )
         context_block = ""
         if pearls:
-        context_block = await synthesizer.synthesize_for_context(
-            pearls=pearls,
-            user_name=config.DEFAULT_USER_NAME,
-            max_context_words=400,
-        )
+            context_block = await synthesizer.synthesize_for_context(
+                pearls=pearls,
+                user_name=config.DEFAULT_USER_NAME,
+                max_context_words=400,
+            )
         full_prompt = (
             f"[MEMORY CONTEXT: {context_block}]\n\n[PROMPT: {request.prompt}]"
             if context_block
