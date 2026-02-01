@@ -91,6 +91,24 @@ def parse_openwebui_export(file_path: Path) -> tuple[list[MessagePair], dict]:
             key=lambda m: m.get("timestamp", 0)
         )
 
+    # Get thread-level timestamp as fallback
+    thread_ts = None
+    for ts_field in ["created_at", "timestamp", "date", "createdAt"]:
+        ts_val = chat.get(ts_field) or thread.get(ts_field)
+        if ts_val:
+            try:
+                if isinstance(ts_val, (int, float)):
+                    if ts_val > 1e12:
+                        thread_ts = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc)
+                    else:
+                        thread_ts = datetime.fromtimestamp(ts_val, tz=timezone.utc)
+                else:
+                    thread_ts = datetime.fromisoformat(str(ts_val).replace("Z", "+00:00"))
+                print(f"[DEBUG] Found thread-level timestamp in {ts_field}: {thread_ts}")
+                break
+            except (ValueError, TypeError, OSError):
+                pass
+
     # Pair user messages with AI responses
     pairs = []
     current_user_msg = None
@@ -125,8 +143,25 @@ def parse_openwebui_export(file_path: Path) -> tuple[list[MessagePair], dict]:
                         ts = datetime.fromtimestamp(ts_val, tz=timezone.utc)
                 else:
                     ts = datetime.fromisoformat(str(ts_val).replace("Z", "+00:00"))
-            except (ValueError, TypeError, OSError):
-                pass
+            except (ValueError, TypeError, OSError) as e:
+                print(f"[DEBUG] Failed to parse timestamp {ts_val!r}: {e}")
+        else:
+            # Try alternative timestamp fields
+            for alt_field in ["created_at", "date", "createdAt"]:
+                alt_val = msg.get(alt_field)
+                if alt_val:
+                    try:
+                        if isinstance(alt_val, (int, float)):
+                            if alt_val > 1e12:
+                                ts = datetime.fromtimestamp(alt_val / 1000, tz=timezone.utc)
+                            else:
+                                ts = datetime.fromtimestamp(alt_val, tz=timezone.utc)
+                        else:
+                            ts = datetime.fromisoformat(str(alt_val).replace("Z", "+00:00"))
+                        print(f"[DEBUG] Found timestamp in {alt_field}: {ts}")
+                        break
+                    except (ValueError, TypeError, OSError):
+                        pass
 
         if role == "user":
             current_user_msg = content
@@ -139,10 +174,14 @@ def parse_openwebui_export(file_path: Path) -> tuple[list[MessagePair], dict]:
             ))
 
             if content.strip():
+                # Use message timestamp, fallback to thread timestamp, then None
+                final_ts = current_user_ts or ts or thread_ts
+                if not final_ts:
+                    print(f"[DEBUG] WARNING: No timestamp found for message pair {len(pairs)+1}")
                 pairs.append(MessagePair(
                     user_message=current_user_msg,
                     ai_response=content,  # Keep full response with reasoning
-                    timestamp=current_user_ts or ts,
+                    timestamp=final_ts,
                     has_reasoning=has_reasoning
                 ))
             current_user_msg = None
@@ -215,6 +254,9 @@ def upload_to_railway(
                 }
                 if pair.timestamp:
                     payload["created_at"] = pair.timestamp.isoformat()
+                    print(f"[DEBUG] Pair {i+1}: Including timestamp {payload['created_at']}")
+                else:
+                    print(f"[DEBUG] Pair {i+1}: WARNING - No timestamp available, will use import time")
 
                 response = client.post(
                     f"{RAILWAY_URL}/memory/add",

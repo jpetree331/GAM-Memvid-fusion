@@ -449,6 +449,16 @@ class Pearl:
         # Safely parse the hit (may be dict or other type from SDK)
         hit_dict = _safe_parse_hit(hit, "from_memvid_hit")
 
+        # DEBUG: Check if hit has direct attributes (not just dict keys)
+        if hasattr(hit, '__dict__'):
+            print(f"[METADATA DEBUG] Hit has __dict__: {list(hit.__dict__.keys())}")
+        if hasattr(hit, '__slots__'):
+            print(f"[METADATA DEBUG] Hit has __slots__: {hit.__slots__}")
+        # Try to get all attributes
+        if not isinstance(hit, dict):
+            attrs = [attr for attr in dir(hit) if not attr.startswith('_')]
+            print(f"[METADATA DEBUG] Hit attributes: {attrs[:20]}")  # First 20
+        
         # Get the text field (for debug only - this is the fingerprint, not full content)
         text = hit_dict.get("text", hit_dict.get("snippet", ""))
 
@@ -458,8 +468,41 @@ class Pearl:
             print(f"[Librarian DEBUG] Hit keys: {hit_dict.keys()}")
 
         # === PARSE METADATA ===
-        # The SDK serializes metadata into the text field, so we need to extract it
-        raw_meta = hit_dict.get("metadata", {})
+        # Try multiple ways to get metadata from the SDK
+        raw_meta = None
+        
+        # Method 1: From hit_dict (standard dict access)
+        raw_meta = hit_dict.get("metadata")
+        
+        # Method 2: Direct attribute access on hit object
+        if raw_meta is None and hasattr(hit, 'metadata'):
+            raw_meta = getattr(hit, 'metadata', None)
+            print(f"[METADATA DEBUG] Got metadata from hit.metadata attribute: {type(raw_meta).__name__}")
+        
+        # Method 3: Check if metadata is nested in hit_dict under different keys
+        if raw_meta is None:
+            for key in ['metadata', 'meta', 'data', 'attrs', 'attributes', 'payload']:
+                if key in hit_dict:
+                    raw_meta = hit_dict[key]
+                    print(f"[METADATA DEBUG] Found metadata in hit_dict['{key}']")
+                    break
+        
+        # Method 4: Check if hit object has metadata as attribute with different name
+        if raw_meta is None and not isinstance(hit, dict):
+            for attr_name in ['metadata', 'meta', 'data', 'attrs', 'attributes']:
+                if hasattr(hit, attr_name):
+                    raw_meta = getattr(hit, attr_name, None)
+                    if raw_meta is not None:
+                        print(f"[METADATA DEBUG] Found metadata in hit.{attr_name} attribute")
+                        break
+        
+        # DEBUG: Log what we found
+        print(f"[METADATA DEBUG] ============================================")
+        print(f"[METADATA DEBUG] hit_dict keys: {list(hit_dict.keys())}")
+        print(f"[METADATA DEBUG] raw_meta type: {type(raw_meta).__name__ if raw_meta is not None else 'None'}")
+        print(f"[METADATA DEBUG] raw_meta value (first 500): {str(raw_meta)[:500] if raw_meta is not None else 'None'}")
+        print(f"[METADATA DEBUG] ============================================")
+        
         meta = _safe_parse_metadata(raw_meta, "from_memvid_hit.metadata")
 
         if _DEBUG_SDK_TYPES:
@@ -556,11 +599,51 @@ class Pearl:
         print(f"[TIMESTAMP DEBUG] from_memvid_hit - RAW metadata: {meta!r}")
         print(f"[TIMESTAMP DEBUG] from_memvid_hit - metadata type: {type(meta).__name__}")
         print(f"[TIMESTAMP DEBUG] from_memvid_hit - metadata keys: {list(meta.keys()) if isinstance(meta, dict) else 'NOT A DICT'}")
-        stored_created_at = meta.get("created_at") if isinstance(meta, dict) else None
+        
+        # CRITICAL INVESTIGATION #1: Check top-level created_at in hit_dict
+        # The logs show 'created_at' is in hit_dict.keys(), so check it directly
+        top_level_created_at = hit_dict.get("created_at")
+        print(f"[INVESTIGATION #1] hit_dict.get('created_at') = {top_level_created_at!r}")
+        print(f"[INVESTIGATION #1] Type: {type(top_level_created_at).__name__ if top_level_created_at is not None else 'None'}")
+        
+        # Also check all top-level fields that might contain timestamp
+        print(f"[INVESTIGATION #1] All hit_dict keys: {list(hit_dict.keys())}")
+        for key in ['created_at', 'timestamp', 'date', 'createdAt', 'created_date']:
+            if key in hit_dict:
+                print(f"[INVESTIGATION #1] hit_dict['{key}'] = {hit_dict[key]!r}")
+        
+        # Try to get created_at from multiple sources
+        stored_created_at = None
+        
+        # Method 1: From top-level hit_dict (CRITICAL - this is what we're investigating)
+        if top_level_created_at is not None:
+            stored_created_at = top_level_created_at
+            print(f"[INVESTIGATION #1] ✓ FOUND created_at at top level: {stored_created_at!r}")
+        
+        # Method 2: From metadata dict (currently empty, but check anyway)
+        if stored_created_at is None and isinstance(meta, dict):
+            stored_created_at = meta.get("created_at")
+            if stored_created_at:
+                print(f"[INVESTIGATION #1] Found created_at in metadata dict: {stored_created_at!r}")
+        
+        # Method 3: Direct attribute on hit object
+        if stored_created_at is None and hasattr(hit, 'created_at'):
+            stored_created_at = getattr(hit, 'created_at', None)
+            if stored_created_at:
+                print(f"[INVESTIGATION #1] Found created_at in hit.created_at attribute: {stored_created_at!r}")
+        
         effective_created_at = stored_created_at if stored_created_at else datetime.now().isoformat()
         print(f"[TIMESTAMP DEBUG] from_memvid_hit - stored created_at: {stored_created_at!r}")
         print(f"[TIMESTAMP DEBUG] from_memvid_hit - using: {effective_created_at!r}")
         print(f"[TIMESTAMP DEBUG] ============================================")
+        
+        # INVESTIGATION RESULT
+        if top_level_created_at is not None:
+            print(f"[INVESTIGATION #1 RESULT] ✓ YES - created_at found at top level: {top_level_created_at!r}")
+            print(f"[INVESTIGATION #1 RESULT] This matches Hypothesis A: SDK stores created_at separately from metadata dict")
+        else:
+            print(f"[INVESTIGATION #1 RESULT] ✗ NO - created_at NOT found at top level")
+            print(f"[INVESTIGATION #1 RESULT] Continue to Investigation #2")
 
         return cls(
             id=hit_dict.get("frame_id", hit_dict.get("title", "")),
@@ -826,12 +909,19 @@ class MemvidStore:
         # Store in Memvid
         # - text: fingerprint (for embedding/search)
         # - metadata: full_payload + indexing metadata (for retrieval)
+        # DEBUG: Verify metadata before storing
+        print(f"[TIMESTAMP DEBUG] About to store - metadata type: {type(metadata_to_store).__name__}")
+        print(f"[TIMESTAMP DEBUG] About to store - metadata keys: {list(metadata_to_store.keys())}")
+        print(f"[TIMESTAMP DEBUG] About to store - created_at in metadata: {metadata_to_store.get('created_at')!r}")
+        
         self._mv.put(
             title=pearl.id,
             label=pearl.get_label(),
             metadata=metadata_to_store,
             text=fingerprint  # Compact fingerprint for embedding
         )
+        
+        print(f"[TIMESTAMP DEBUG] Storage complete for pearl {pearl.id}")
 
         self._pearl_count += 1
         self._last_update = datetime.now().isoformat()

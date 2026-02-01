@@ -587,10 +587,12 @@ async def add_pearl(request: AddPearlRequest):
         logger.info(f"[TIMESTAMP DEBUG] request.created_at = {request.created_at!r}")
         logger.info(f"[TIMESTAMP DEBUG] type = {type(request.created_at).__name__}")
         logger.info(f"[TIMESTAMP DEBUG] bool(request.created_at) = {bool(request.created_at)}")
+        logger.info(f"[TIMESTAMP DEBUG] Full request dict keys: {request.model_dump().keys()}")
         logger.info(f"[TIMESTAMP DEBUG] ============================================")
         logger.debug(f"  REQUEST DUMP: tags={request.tags!r}")
         logger.debug(f"  REQUEST DUMP: category={request.category!r}")
         logger.debug(f"  user_message length: {len(request.user_message)}")
+        logger.debug(f"  user_message preview: {request.user_message[:100] if request.user_message else 'EMPTY'}")
 
         vault_mgr = get_vault_mgr()
         store = vault_mgr.get_store(request.model_id)
