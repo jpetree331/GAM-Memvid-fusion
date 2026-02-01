@@ -947,16 +947,33 @@ async def get_recent_memories(
         vault_mgr = get_vault_mgr()
         store = vault_mgr.get_store(model_id)
 
-        # Try to get recent pearls
+        # Get recent pearls using the new method that returns Pearls directly
+        # This ensures we get ALL Pearls by searching across categories
         try:
-            memories = store.get_recent(limit=limit)
-            logger.info(f"store.get_recent returned {len(memories)} items")
+            memories = store.get_recent_pearls(limit=limit)
+            logger.info(f"store.get_recent_pearls returned {len(memories)} items")
         except AttributeError:
-            # Fallback: search with broad query
-            logger.warning("get_recent not available, using search fallback")
-            results = store.search_pearls(query="*", limit=limit)
-            memories = [r.pearl if hasattr(r, 'pearl') else r for r in results]
-            logger.info(f"search fallback returned {len(memories)} items")
+            # Fallback: use category-based search to get ALL Pearls (like export does)
+            logger.warning("get_recent_pearls not available, using category-based search")
+            memories = []
+            from memory_entry import MemoryCategory
+            deleted_ids = store.get_deleted_pearl_ids()
+            seen_ids = set()
+            
+            for cat in MemoryCategory:
+                try:
+                    results = store.search_pearls(query=f"category:{cat.value}", limit=limit * 10, mode="lex")
+                    for r in results:
+                        if r.pearl.id not in seen_ids and r.pearl.id not in deleted_ids:
+                            memories.append(r.pearl)
+                            seen_ids.add(r.pearl.id)
+                except Exception:
+                    pass
+            
+            # Sort by created_at and limit
+            memories.sort(key=lambda p: p.created_at or "", reverse=True)
+            memories = memories[:limit]
+            logger.info(f"category-based search returned {len(memories)} items")
 
         # DEBUG: Log RAW pearls before hydration
         logger.debug("=" * 80)

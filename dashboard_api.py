@@ -199,30 +199,71 @@ def api_get_stats(model_id: str) -> dict:
 
 def api_get_recent(model_id: str, limit: int = 50) -> List[Pearl]:
     """
-    Get recent memories for the Feed by reusing the search endpoint.
+    Get recent memories for the Feed using the /recent endpoint.
 
-    This sidesteps any mismatch between /recent and /search response formats
-    and guarantees the Feed sees the same hydrated content as Search & Synthesis Lab.
+    This uses the proper timeline-based retrieval which gets ALL memories,
+    not just search results.
     """
     try:
         logger.info(f"api_get_recent called for model={model_id}, limit={limit}")
 
-        # Reuse the working search endpoint with empty query to get all memories
-        results = api_search(model_id=model_id, query="*", limit=limit)
+        with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+            # Use the /recent endpoint which uses timeline() or find("") to get all memories
+            r = client.get(
+                f"{MEMORY_SERVER_URL}/memory/{model_id}/recent",
+                params={"limit": limit}
+            )
+            r.raise_for_status()
+            data = r.json()
 
-        # Extract pearls from search results
-        pearls = [r.pearl for r in results if r.pearl is not None]
+            # Extract items from response
+            items = data.get("items") or data.get("results") or []
+            
+            pearls = []
+            for item in items:
+                # Extract text content - handle hydrated format
+                user_msg = item.get("user_message", "")
+                ai_msg = item.get("ai_response", "")
 
-        # Sort by created_at (most recent first)
-        pearls.sort(key=lambda p: p.created_at or "", reverse=True)
+                # If not found, try to parse from "text" field
+                if not user_msg and not ai_msg:
+                    text = item.get("text", "") or item.get("content", "")
+                    if "User:" in text and "AI:" in text:
+                        parts = text.split("AI:", 1)
+                        user_msg = parts[0].replace("User:", "").strip()
+                        ai_msg = parts[1].strip() if len(parts) > 1 else ""
+                    else:
+                        user_msg = text
 
-        logger.info(f"api_get_recent returning {len(pearls)} pearls via search endpoint")
+                # Extract timestamp
+                created_at = (
+                    item.get("created_at") or
+                    item.get("metadata", {}).get("created_at") or
+                    item.get("timestamp")
+                )
 
-        if pearls:
-            logger.debug(f"First pearl: id={pearls[0].id}, created_at={pearls[0].created_at}")
-            logger.debug(f"  user_message (first 100): {pearls[0].user_message[:100] if pearls[0].user_message else 'EMPTY'}")
+                pearl = Pearl(
+                    id=item.get("id", ""),
+                    user_message=user_msg,
+                    ai_response=ai_msg,
+                    category=item.get("category", "context"),
+                    importance=item.get("importance", "normal"),
+                    tags=item.get("tags", []),
+                    created_at=created_at,
+                    status=item.get("status", "active")
+                )
+                pearls.append(pearl)
 
-        return pearls
+            # Sort by created_at (most recent first) - should already be sorted but ensure it
+            pearls.sort(key=lambda p: p.created_at or "", reverse=True)
+
+            logger.info(f"api_get_recent returning {len(pearls)} pearls via /recent endpoint")
+
+            if pearls:
+                logger.debug(f"First pearl: id={pearls[0].id}, created_at={pearls[0].created_at}")
+                logger.debug(f"  user_message (first 100): {pearls[0].user_message[:100] if pearls[0].user_message else 'EMPTY'}")
+
+            return pearls
 
     except Exception as e:
         logger.exception(f"Failed to get recent memories for {model_id}")

@@ -1407,6 +1407,82 @@ class MemvidStore:
         all_ai_self = self.get_ai_self_memories()
         return [m for m in all_ai_self if ai_self_type in m.tags]
 
+    def get_recent_pearls(self, limit: int = 50) -> List[Pearl]:
+        """
+        Get most recent Pearls (returns Pearl objects, not MemoryEntry).
+        
+        This method searches across all categories to ensure we get ALL Pearls,
+        not just search results.
+        """
+        try:
+            deleted_ids = self.get_deleted_pearl_ids()
+            hits = []
+
+            # Try timeline first (most efficient)
+            if hasattr(self._mv, 'timeline'):
+                try:
+                    result = self._mv.timeline(limit=limit * 2)
+                    hits = _extract_hits_from_result(result, "get_recent_pearls.timeline")
+                except Exception as timeline_err:
+                    err_str = str(timeline_err)
+                    if "MV005" in err_str:
+                        # MV005: Vault too small for timeline - fall through
+                        if _DEBUG_SDK_TYPES:
+                            print(f"[Librarian DEBUG] MV005 ignored: Vault too small for timeline")
+                    else:
+                        raise
+
+            # Fallback: Search across all categories (like export() does) to get ALL Pearls
+            if not hits:
+                all_hits = []
+                from memory_entry import MemoryCategory
+                for cat in MemoryCategory:
+                    try:
+                        find_result = self._mv.find(f"category:{cat.value}", k=limit * 10, mode="lex")
+                        cat_hits = _extract_hits_from_result(find_result, f"get_recent_pearls.category.{cat.value}")
+                        all_hits.extend(cat_hits)
+                    except Exception:
+                        pass
+                hits = all_hits
+
+            # If still no hits, try empty string search as last resort
+            if not hits:
+                try:
+                    result = self._mv.find("", k=limit * 3, mode="lex")
+                    hits = _extract_hits_from_result(result, "get_recent_pearls.find")
+                except Exception:
+                    pass
+
+            pearls = []
+            seen_ids = set()  # Deduplicate
+            for hit in hits:
+                hit_dict = _safe_parse_hit(hit, "get_recent_pearls.hit")
+                label = hit_dict.get("label", "")
+                if "deletion_marker" in label:
+                    continue
+                
+                pearl_id = hit_dict.get("title", "")
+                if pearl_id in deleted_ids or pearl_id in seen_ids:
+                    continue
+                seen_ids.add(pearl_id)
+
+                pearl = Pearl.from_memvid_hit(hit_dict, self.model_id)
+                pearls.append(pearl)
+
+            # Sort by created_at (most recent first)
+            pearls.sort(key=lambda p: p.created_at or "", reverse=True)
+            return pearls[:limit]
+
+        except Exception as e:
+            if "MV005" in str(e):
+                if _DEBUG_SDK_TYPES:
+                    print(f"[Librarian DEBUG] MV005 ignored: Vault too small for timeline")
+                return []
+            print(f"[Librarian] Error getting recent pearls: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
     def get_recent(self, limit: int = 10) -> List[MemoryEntry]:
         """Get most recent memories."""
         try:
@@ -1424,24 +1500,44 @@ class MemvidStore:
                         # MV005: Time index track is invalid - vault too small for timeline
                         if _DEBUG_SDK_TYPES:
                             print(f"[Librarian DEBUG] MV005 ignored: Vault too small for timeline")
-                        # Fall through to lexical search
+                        # Fall through to category-based search
                     else:
                         # Re-raise unexpected errors
                         raise
 
-            # Fallback to lexical search if timeline failed or returned nothing
+            # Fallback: Search across all categories (like export() does) to get ALL Pearls
             if not hits:
-                result = self._mv.find("", k=limit * 3, mode="lex")
-                hits = _extract_hits_from_result(result, "get_recent.find")
+                all_hits = []
+                from memory_entry import MemoryCategory
+                for cat in MemoryCategory:
+                    try:
+                        find_result = self._mv.find(f"category:{cat.value}", k=limit * 10, mode="lex")
+                        cat_hits = _extract_hits_from_result(find_result, f"get_recent.category.{cat.value}")
+                        all_hits.extend(cat_hits)
+                    except Exception:
+                        pass
+                hits = all_hits
+
+            # If still no hits, try empty string search as last resort
+            if not hits:
+                try:
+                    result = self._mv.find("", k=limit * 3, mode="lex")
+                    hits = _extract_hits_from_result(result, "get_recent.find")
+                except Exception:
+                    pass
 
             entries = []
+            seen_ids = set()  # Deduplicate
             for hit in hits:
                 hit_dict = _safe_parse_hit(hit, "get_recent.hit")
                 label = hit_dict.get("label", "")
                 if "deletion_marker" in label:
                     continue
-                if hit_dict.get("title", "") in deleted_ids:
+                
+                pearl_id = hit_dict.get("title", "")
+                if pearl_id in deleted_ids or pearl_id in seen_ids:
                     continue
+                seen_ids.add(pearl_id)
 
                 pearl = Pearl.from_memvid_hit(hit_dict, self.model_id)
                 entries.append(MemoryEntry(
@@ -1463,6 +1559,8 @@ class MemvidStore:
                     print(f"[Librarian DEBUG] MV005 ignored: Vault too small for timeline")
                 return []
             print(f"[Librarian] Error getting recent: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def get_by_tag(self, tag: str, limit: int = 50) -> List[MemoryEntry]:
