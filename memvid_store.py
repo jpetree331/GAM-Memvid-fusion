@@ -359,6 +359,8 @@ class Pearl:
     thread_id: Optional[str] = None      # Conversation thread this belongs to
     message_index: Optional[int] = None  # Position in thread
     word_count: int = 0
+    # Raw metadata from vault (for filtering e.g. schedule_id); set in from_memvid_hit
+    metadata: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         """Calculate word count on creation."""
@@ -681,7 +683,8 @@ class Pearl:
             thread_id=meta.get("thread_id"),
             message_index=meta.get("message_index"),
             word_count=meta.get("word_count", 0),
-            model_id=model_id
+            model_id=model_id,
+            metadata=meta if isinstance(meta, dict) else None
         )
 
     def is_deleted(self) -> bool:
@@ -855,7 +858,9 @@ class MemvidStore:
         user_name: str = "User",
         thread_id: Optional[str] = None,
         message_index: Optional[int] = None,
-        pearl_id: Optional[str] = None
+        pearl_id: Optional[str] = None,
+        pearl_type: str = "conversation",
+        extra_metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Add a complete conversation exchange (Pearl) to the vault.
@@ -882,13 +887,22 @@ class MemvidStore:
             thread_id: Optional thread/conversation ID
             message_index: Position in the conversation thread
             pearl_id: Optional explicit ID (auto-generated if not provided)
+            pearl_type: "conversation" (default) or "ai_reflection" (e.g. journal entries)
+            extra_metadata: Optional dict merged into stored metadata (e.g. schedule_id, source)
 
         Returns:
             The Pearl ID
         """
+        tags = list(tags or [])
+        if pearl_type == "ai_reflection" and "ai_reflection" not in tags:
+            tags.append("ai_reflection")
+        if pearl_type == "ai_reflection" and "journal" not in tags:
+            tags.append("journal")
+
         # Generate ID if not provided
         if not pearl_id:
-            pearl_id = f"pearl_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+            prefix = "journal_" if pearl_type == "ai_reflection" else "pearl_"
+            pearl_id = f"{prefix}{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
         # DEBUG: Log the created_at value being used
         effective_created_at = created_at if created_at else datetime.now().isoformat()
@@ -900,8 +914,8 @@ class MemvidStore:
             id=pearl_id,
             user_message=user_message,
             ai_response=ai_response,
-            tags=tags or [],
-            category=category,
+            tags=tags,
+            category=category if pearl_type == "conversation" else "ai_reflection",
             importance=importance,
             emotional_tone=emotional_tone,
             created_at=effective_created_at,
@@ -924,6 +938,9 @@ class MemvidStore:
 
         # Get metadata and verify created_at is included
         metadata_to_store = pearl.get_metadata()
+        metadata_to_store["pearl_type"] = pearl_type
+        if extra_metadata:
+            metadata_to_store.update(extra_metadata)
         print(f"[TIMESTAMP DEBUG] Metadata to store - created_at: {metadata_to_store.get('created_at')!r}")
         print(f"[TIMESTAMP DEBUG] Metadata keys: {list(metadata_to_store.keys())}")
         print(f"[TIMESTAMP DEBUG] ============================================")
@@ -1739,25 +1756,97 @@ class MemvidStore:
     def get_raw_pearls_for_synthesis(
         self,
         query: str,
-        limit: int = 5
+        limit: int = 5,
+        thread_id: Optional[str] = None,
+        exclude_pearl_type: Optional[str] = None
     ) -> List[Pearl]:
         """
         Get raw Pearls for the Synthesizer to process.
 
         This is the key method for the Librarian architecture:
         1. Search finds relevant Pearls
-        2. Return full, raw content
-        3. Caller passes to Synthesizer for abstraction
+        2. Optionally merge with thread Pearls when thread_id is provided
+        3. Optionally exclude Pearls by type (e.g. ai_reflection for journal context)
+        4. Return full, raw content for abstraction
 
         Args:
             query: Search query
             limit: Maximum Pearls to return
+            thread_id: If provided, include Pearls from this thread and prioritize them
+            exclude_pearl_type: If set (e.g. "ai_reflection"), exclude Pearls with this type
 
         Returns:
             List of full Pearl objects with complete content
         """
+        def filtered(pearls: List[Pearl]) -> List[Pearl]:
+            if not exclude_pearl_type:
+                return pearls
+            # Pearl uses category for ai_reflection (same value as pearl_type in metadata)
+            return [p for p in pearls if getattr(p, "category", "") != exclude_pearl_type]
+
+        if thread_id:
+            thread_pearls = self.get_thread_pearls(thread_id)
+            thread_pearls = filtered(thread_pearls)
+            search_results = self.search_pearls(query, limit=limit, mode="hybrid")
+            search_pearls = filtered([r.pearl for r in search_results])
+            seen = {p.id for p in thread_pearls}
+            for p in search_pearls:
+                if p.id not in seen:
+                    thread_pearls.append(p)
+                    seen.add(p.id)
+            return thread_pearls[:limit]
         results = self.search_pearls(query, limit=limit, mode="hybrid")
-        return [r.pearl for r in results]
+        return filtered([r.pearl for r in results])[:limit]
+
+    def get_pearls_by_type(
+        self,
+        pearl_type: str,
+        thread_id: Optional[str] = None,
+        limit: int = 50,
+        schedule_id: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None
+    ) -> List[Pearl]:
+        """
+        Get Pearls by type (e.g. ai_reflection for journal entries).
+
+        Uses tag search (tag:ai_reflection) then filters by metadata.pearl_type,
+        optional thread_id, schedule_id, and optional from_date/to_date (ISO strings).
+        Sorted by created_at descending.
+        """
+        if pearl_type != "ai_reflection":
+            return []
+        try:
+            find_result = self._mv.find("tag:ai_reflection", k=limit * 4, mode="lex")
+            hits = _extract_hits_from_result(find_result, "get_pearls_by_type")
+            deleted_ids = self.get_deleted_pearl_ids()
+            pearls = []
+            for hit in hits:
+                hit_dict = _safe_parse_hit(hit, "get_pearls_by_type.hit")
+                if "deletion_marker" in (hit_dict.get("label") or ""):
+                    continue
+                title = hit_dict.get("title") or hit_dict.get("frame_id", "")
+                if not title or title in deleted_ids:
+                    continue
+                meta = _safe_parse_metadata(hit_dict.get("metadata", {}), "get_pearls_by_type.meta")
+                if meta.get("pearl_type") != pearl_type:
+                    continue
+                if thread_id is not None and meta.get("thread_id") != thread_id:
+                    continue
+                if schedule_id is not None and meta.get("schedule_id") != schedule_id:
+                    continue
+                p = Pearl.from_memvid_hit(hit_dict, self.model_id)
+                created = p.created_at or ""
+                if from_date and created < from_date:
+                    continue
+                if to_date and created > to_date:
+                    continue
+                pearls.append(p)
+            pearls.sort(key=lambda p: p.created_at or "", reverse=True)
+            return pearls[:limit]
+        except Exception as e:
+            print(f"[Librarian] Error get_pearls_by_type: {e}")
+            return []
 
     def get_thread_pearls(self, thread_id: str) -> List[Pearl]:
         """Get all Pearls from a specific conversation thread."""

@@ -229,7 +229,8 @@ class Synthesizer:
         ai_response: str,
         user_name: str = "User",
         tags: Optional[List[str]] = None,
-        timestamp: Optional[str] = None
+        timestamp: Optional[str] = None,
+        system_prompt_override: Optional[str] = None
     ) -> SynthesisResult:
         """
         Synthesize a single Pearl into a detailed abstract.
@@ -258,6 +259,7 @@ class Synthesizer:
             ai_response=ai_response[:8000]
         )
 
+        system_prompt = (system_prompt_override or SYNTHESIS_SYSTEM_PROMPT).strip() or SYNTHESIS_SYSTEM_PROMPT
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
@@ -266,7 +268,7 @@ class Synthesizer:
                     json={
                         "model": self.model,
                         "messages": [
-                            {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+                            {"role": "system", "content": system_prompt},
                             {"role": "user", "content": prompt}
                         ],
                         "temperature": 0.3,
@@ -320,7 +322,8 @@ class Synthesizer:
     async def synthesize_pearls(
         self,
         pearls: List[Dict[str, Any]],
-        user_name: str = "User"
+        user_name: str = "User",
+        system_prompt_override: Optional[str] = None
     ) -> SynthesisBatch:
         """
         Synthesize multiple Pearls into abstracts.
@@ -328,6 +331,7 @@ class Synthesizer:
         Args:
             pearls: List of Pearl dicts with user_message, ai_response, etc.
             user_name: User's name for transcripts
+            system_prompt_override: Optional custom system prompt (from valve); empty uses default
 
         Returns:
             SynthesisBatch with all abstracts and combined context
@@ -343,7 +347,8 @@ class Synthesizer:
                 ai_response=pearl.get("ai_response", ""),
                 user_name=user_name,
                 tags=pearl.get("tags", []),
-                timestamp=pearl.get("created_at")
+                timestamp=pearl.get("created_at"),
+                system_prompt_override=system_prompt_override
             ))
 
         results = await asyncio.gather(*tasks)
@@ -371,7 +376,8 @@ class Synthesizer:
         pearls: List[Dict[str, Any]],
         user_name: str = "User",
         max_context_words: int = 800,
-        create_unified: bool = True
+        create_unified: bool = True,
+        system_prompt_override: Optional[str] = None
     ) -> str:
         """
         Synthesize Pearls into context ready for prompt injection.
@@ -387,6 +393,7 @@ class Synthesizer:
             user_name: User's name
             max_context_words: Target word limit for combined context
             create_unified: If True, create a unified narrative; else concatenate
+            system_prompt_override: Optional custom system prompt (e.g. from valve); empty uses default
 
         Returns:
             Context string ready for prompt injection
@@ -410,7 +417,7 @@ class Synthesizer:
             else:
                 pearl_dicts.append(p)
 
-        batch = await self.synthesize_pearls(pearl_dicts, user_name)
+        batch = await self.synthesize_pearls(pearl_dicts, user_name, system_prompt_override=system_prompt_override)
 
         if create_unified and len(batch.abstracts) > 1:
             # Create a unified narrative from all abstracts
@@ -582,7 +589,7 @@ async def synthesize_for_prompt(
 
         store = get_store("eli")
         pearls = store.get_raw_pearls_for_synthesis("theology discussion")
-        context = await synthesize_for_prompt(pearls, user_name="Jess")
+        context = await synthesize_for_prompt(pearls, user_name="User")  # or pass name from valve/config
         # context is now ready for prompt injection
     """
     synth = get_synthesizer()

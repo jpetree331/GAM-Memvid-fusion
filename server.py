@@ -27,13 +27,14 @@ Endpoints:
 import os
 import re
 import html
+import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Any, Union
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -41,6 +42,7 @@ from pydantic import BaseModel, Field
 from config import config
 from memvid_store import get_store, get_vault_manager, MemvidStore, Pearl
 from synthesizer import get_synthesizer, Synthesizer
+from continuum_bridge import get_model_id_for_thread, post_message_to_thread, list_chats
 
 # =============================================================================
 # Logging Setup
@@ -70,6 +72,10 @@ class AddPearlRequest(BaseModel):
     importance: Optional[str] = Field(default="normal", description="Importance: core, high, normal, low")
     user_name: Optional[str] = Field(default="User", description="User's display name")
     created_at: Optional[str] = Field(default=None, description="Original timestamp (ISO format) for imports")
+    pearl_type: Optional[str] = Field(default="conversation", description="Type: conversation or ai_reflection (e.g. journal)")
+    thread_id: Optional[str] = Field(default=None, description="Thread ID (e.g. OpenWebUI chat id)")
+    schedule_id: Optional[str] = Field(default=None, description="Continuum schedule ID (for ai_reflection)")
+    source: Optional[str] = Field(default=None, description="Source label (e.g. continuum)")
 
 
 class AddPearlResponse(BaseModel):
@@ -86,6 +92,9 @@ class ContextRequest(BaseModel):
     user_name: Optional[str] = Field(default="User", description="User's display name")
     limit: Optional[int] = Field(default=5, ge=1, le=20, description="Max Pearls to retrieve")
     max_words: Optional[int] = Field(default=400, ge=100, le=2000, description="Target context word count")
+    thread_id: Optional[str] = Field(default=None, description="Thread ID for thread-aware context")
+    exclude_pearl_type: Optional[str] = Field(default=None, description="Exclude Pearls with this type (e.g. ai_reflection for journal context)")
+    synthesis_system_prompt: Optional[str] = Field(default=None, description="[Advanced] Custom system prompt for memory synthesis; empty = use server default")
 
 
 class ContextResponse(BaseModel):
@@ -115,6 +124,14 @@ class SearchResponse(BaseModel):
     count: int
 
 
+class SearchByTypeRequest(BaseModel):
+    """Request to search memories by pearl_type (e.g. ai_reflection)."""
+    model_id: str = Field(..., description="Model/persona identifier")
+    pearl_type: str = Field(..., description="Type: conversation or ai_reflection")
+    thread_id: Optional[str] = Field(default=None, description="Filter by thread ID")
+    limit: int = Field(default=50, ge=1, le=200, description="Max results")
+
+
 class DeleteRequest(BaseModel):
     """Request to soft-delete a Pearl."""
     pearl_id: str = Field(..., description="ID of the Pearl to delete")
@@ -126,6 +143,22 @@ class DeleteResponse(BaseModel):
     success: bool
     pearl_id: str
     message: str
+
+
+# Continuum bridge (journal/scheduler)
+class JournalTriggerRequest(BaseModel):
+    """Request to trigger a journal entry via a thread."""
+    thread_id: str = Field(..., description="OpenWebUI chat/thread ID")
+    prompt: str = Field(..., description="Scheduled prompt to send")
+    schedule_id: str = Field(..., description="Continuum schedule ID")
+
+
+class JournalTriggerResponse(BaseModel):
+    """Response from triggering a journal entry."""
+    entry_id: str = Field(..., description="Pearl ID of the stored journal entry")
+    response: str = Field(..., description="AI response text")
+    timestamp: str = Field(..., description="ISO timestamp")
+    model_id: Optional[str] = Field(default=None, description="Resolved model_id for the thread")
 
 
 # =============================================================================
@@ -601,6 +634,11 @@ async def add_pearl(request: AddPearlRequest):
         created_at_to_pass = request.created_at
         logger.info(f"[TIMESTAMP DEBUG] Passing to store.add_pearl: created_at={created_at_to_pass!r}")
 
+        extra = {}
+        if request.schedule_id is not None:
+            extra["schedule_id"] = request.schedule_id
+        if request.source is not None:
+            extra["source"] = request.source
         pearl_id = store.add_pearl(
             user_message=request.user_message,
             ai_response=request.ai_response,
@@ -608,7 +646,10 @@ async def add_pearl(request: AddPearlRequest):
             category=request.category or "context",
             importance=request.importance or "normal",
             user_name=request.user_name or "User",
-            created_at=created_at_to_pass  # Use the preserved timestamp!
+            created_at=created_at_to_pass,
+            thread_id=request.thread_id,
+            pearl_type=request.pearl_type or "conversation",
+            extra_metadata=extra if extra else None
         )
 
         word_count = len(request.user_message.split()) + len(request.ai_response.split())
@@ -641,7 +682,9 @@ async def get_context(request: ContextRequest):
 
         pearls = store.get_raw_pearls_for_synthesis(
             query=request.query,
-            limit=request.limit or 5
+            limit=request.limit or 5,
+            thread_id=request.thread_id,
+            exclude_pearl_type=request.exclude_pearl_type
         )
 
         if not pearls:
@@ -653,8 +696,9 @@ async def get_context(request: ContextRequest):
 
         context = await synthesizer.synthesize_for_context(
             pearls=pearls,
-            user_name=request.user_name or "User",
-            max_context_words=request.max_words or 400
+            user_name=request.user_name or config.DEFAULT_USER_NAME,
+            max_context_words=request.max_words or 400,
+            system_prompt_override=request.synthesis_system_prompt
         )
 
         return ContextResponse(
@@ -690,7 +734,9 @@ async def get_lived_context(request: ContextRequest):
 
         pearls = store.get_raw_pearls_for_synthesis(
             query=request.query,
-            limit=request.limit or 5
+            limit=request.limit or 5,
+            thread_id=request.thread_id,
+            exclude_pearl_type=request.exclude_pearl_type
         )
 
         if not pearls:
@@ -702,7 +748,7 @@ async def get_lived_context(request: ContextRequest):
 
         context = await synthesizer.synthesize_for_lived_context(
             pearls=pearls,
-            user_name=request.user_name or "User",
+            user_name=request.user_name or config.DEFAULT_USER_NAME,
             query=request.query,
             max_words=request.max_words or 400
         )
@@ -744,6 +790,24 @@ async def search_memories(request: SearchRequest):
 
     except Exception as e:
         logger.exception("Error searching model %s", request.model_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/memory/search/by-type", response_model=SearchResponse)
+async def search_memories_by_type(request: SearchByTypeRequest):
+    """Get Pearls by type (e.g. ai_reflection for journal entries)."""
+    try:
+        vault_mgr = get_vault_mgr()
+        store = vault_mgr.get_store(request.model_id)
+        pearls = store.get_pearls_by_type(
+            pearl_type=request.pearl_type,
+            thread_id=request.thread_id,
+            limit=request.limit
+        )
+        hydrated = [hydrate_pearl(r) for r in pearls]
+        return SearchResponse(results=hydrated, count=len(hydrated))
+    except Exception as e:
+        logger.exception("Error searching by type for model %s", request.model_id)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1091,6 +1155,291 @@ async def get_recent_memories(
             status_code=500,
             detail=f"Failed to load recent memories: {str(e)}"
         )
+
+
+# =============================================================================
+# Continuum Bridge: optional API key auth
+# =============================================================================
+
+def _check_bridge_api_key(req: Request) -> None:
+    """If CONTINUUM_BRIDGE_API_KEY is set, require Authorization: Bearer <key> or X-API-Key: <key>."""
+    key = config.CONTINUUM_BRIDGE_API_KEY
+    if not key:
+        return
+    auth = req.headers.get("Authorization") or ""
+    api_key_header = req.headers.get("X-API-Key") or ""
+    token = auth.replace("Bearer ", "").strip() if auth.startswith("Bearer ") else api_key_header.strip()
+    if token != key:
+        raise HTTPException(status_code=401, detail="Invalid or missing bridge API key")
+
+
+# =============================================================================
+# Continuum Bridge Endpoints (journal/scheduler)
+# =============================================================================
+
+@app.post("/continuum/journal/trigger", response_model=JournalTriggerResponse)
+async def continuum_journal_trigger(
+    request: JournalTriggerRequest,
+    _: None = Depends(_check_bridge_api_key),
+):
+    """
+    Trigger a journal entry: fetch memory context (excluding other journal entries),
+    send enriched prompt to OpenWebUI thread, capture AI response,
+    store as ai_reflection pearl in the vault for that thread's model.
+    """
+    base_url = config.CONTINUUM_OPENWEBUI_BASE_URL
+    api_key = config.CONTINUUM_OPENWEBUI_API_KEY
+    if not base_url or not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Continuum bridge not configured: set CONTINUUM_OPENWEBUI_BASE_URL and CONTINUUM_OPENWEBUI_API_KEY",
+        )
+    try:
+        model_id = get_model_id_for_thread(base_url, api_key, request.thread_id)
+        if not model_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Could not resolve model for thread {request.thread_id}",
+            )
+        vault_mgr = get_vault_mgr()
+        store = vault_mgr.get_store(model_id)
+        synthesizer = get_synth()
+
+        # Enriched context: memories + thread history, excluding other journal entries
+        pearls = store.get_raw_pearls_for_synthesis(
+            query=request.prompt,
+            limit=5,
+            thread_id=request.thread_id,
+            exclude_pearl_type="ai_reflection",
+        )
+        context_block = ""
+        if pearls:
+        context_block = await synthesizer.synthesize_for_context(
+            pearls=pearls,
+            user_name=config.DEFAULT_USER_NAME,
+            max_context_words=400,
+        )
+        full_prompt = (
+            f"[MEMORY CONTEXT: {context_block}]\n\n[PROMPT: {request.prompt}]"
+            if context_block
+            else request.prompt
+        )
+
+        response_text = post_message_to_thread(
+            base_url, api_key, request.thread_id, full_prompt
+        )
+        if response_text.startswith("Error:") or response_text.startswith("OpenWebUI "):
+            raise HTTPException(
+                status_code=502,
+                detail=response_text[:500],
+            )
+
+        # Duplicate prevention: same schedule_id within 60s -> return existing
+        now_ts = datetime.utcnow()
+        recent = store.get_pearls_by_type(
+            pearl_type="ai_reflection",
+            thread_id=request.thread_id,
+            limit=20,
+        )
+        for p in recent:
+            meta = getattr(p, "metadata", None) or {}
+            if meta.get("schedule_id") != request.schedule_id:
+                continue
+            created = getattr(p, "created_at", None)
+            if not created:
+                continue
+            try:
+                created_str = created.replace("Z", "+00:00") if isinstance(created, str) else str(created)
+                created_dt = datetime.fromisoformat(created_str)
+                created_utc = created_dt.astimezone(timezone.utc).replace(tzinfo=None) if created_dt.tzinfo else created_dt
+                if (now_ts - created_utc).total_seconds() < 60:
+                    return JournalTriggerResponse(
+                        entry_id=p.id,
+                        response=response_text,
+                        timestamp=now_ts.isoformat() + "Z",
+                        model_id=model_id,
+                    )
+            except (ValueError, TypeError):
+                pass
+        # No duplicate; add new pearl with "scheduled" tag
+        extra = {
+            "schedule_id": request.schedule_id,
+            "source": "continuum",
+            "thread_id": request.thread_id,
+        }
+        entry_id = store.add_pearl(
+            user_message=request.prompt,
+            ai_response=response_text,
+            tags=["ai_reflection", "journal", "scheduled"],
+            category="ai_reflection",
+            importance="normal",
+            user_name=config.DEFAULT_USER_NAME,
+            created_at=None,
+            thread_id=request.thread_id,
+            pearl_type="ai_reflection",
+            extra_metadata=extra,
+        )
+        return JournalTriggerResponse(
+            entry_id=entry_id,
+            response=response_text,
+            timestamp=now_ts.isoformat() + "Z",
+            model_id=model_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in continuum journal trigger")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/continuum/journal/entries", dependencies=[Depends(_check_bridge_api_key)])
+async def continuum_journal_entries(
+    model_id: Optional[str] = Query(default=None, description="Vault/model ID; if omitted, first vault is used"),
+    thread_id: Optional[str] = Query(default=None, description="Filter by OpenWebUI thread ID"),
+    schedule_id: Optional[str] = Query(default=None, description="Filter by Continuum schedule ID"),
+    from_date: Optional[str] = Query(default=None, description="Filter entries created on or after (ISO date)"),
+    to_date: Optional[str] = Query(default=None, description="Filter entries created on or before (ISO date)"),
+    limit: int = Query(default=50, ge=1, le=200),
+    skip: int = Query(default=0, ge=0, description="Offset for pagination"),
+):
+    """Get journal entries (ai_reflection pearls) from the vault, optionally filtered by thread/schedule/date."""
+    try:
+        vault_mgr = get_vault_mgr()
+        resolved_model_id = model_id
+        if not resolved_model_id:
+            vault_files = vault_mgr.get_all_vault_files()
+            if not vault_files:
+                return {"entries": [], "count": 0, "model_id": None, "has_more": False}
+            resolved_model_id = vault_files[0].replace(".mv2", "")
+        store = vault_mgr.get_store(resolved_model_id)
+        fetch_limit = (limit + skip) if skip else limit
+        pearls = store.get_pearls_by_type(
+            pearl_type="ai_reflection",
+            thread_id=thread_id,
+            limit=fetch_limit + 1,
+            schedule_id=schedule_id,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        has_more = len(pearls) > fetch_limit
+        pearls = pearls[skip : skip + limit] if skip else pearls[:limit]
+        hydrated = [hydrate_pearl(p) for p in pearls]
+        return {
+            "entries": hydrated,
+            "count": len(hydrated),
+            "model_id": resolved_model_id,
+            "has_more": has_more,
+        }
+    except Exception as e:
+        logger.exception("Error listing continuum journal entries")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/continuum/threads", dependencies=[Depends(_check_bridge_api_key)])
+async def continuum_threads(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    """List OpenWebUI chats/threads (proxy to OpenWebUI API)."""
+    base_url = config.CONTINUUM_OPENWEBUI_BASE_URL
+    api_key = config.CONTINUUM_OPENWEBUI_API_KEY
+    if not base_url or not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Continuum bridge not configured: set CONTINUUM_OPENWEBUI_BASE_URL and CONTINUUM_OPENWEBUI_API_KEY",
+        )
+    try:
+        chats = list_chats(base_url, api_key, skip=skip, limit=limit)
+        return {"threads": chats, "count": len(chats)}
+    except Exception as e:
+        logger.exception("Error listing continuum threads")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/continuum/threads/{thread_id}/model", dependencies=[Depends(_check_bridge_api_key)])
+async def continuum_thread_model(thread_id: str):
+    """Resolve OpenWebUI thread ID to model_id (vault identifier)."""
+    base_url = config.CONTINUUM_OPENWEBUI_BASE_URL
+    api_key = config.CONTINUUM_OPENWEBUI_API_KEY
+    if not base_url or not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Continuum bridge not configured: set CONTINUUM_OPENWEBUI_BASE_URL and CONTINUUM_OPENWEBUI_API_KEY",
+        )
+    model_id = get_model_id_for_thread(base_url, api_key, thread_id)
+    if not model_id:
+        raise HTTPException(status_code=404, detail=f"Could not resolve model for thread {thread_id}")
+    return {"thread_id": thread_id, "model_id": model_id}
+
+
+# =============================================================================
+# Continuum persistence (schedules, settings) - stored under DATA_DIR/continuum
+# =============================================================================
+
+_CONTINUUM_SCHEDULES_FILE = "schedules.json"
+_CONTINUUM_SETTINGS_FILE = "settings.json"
+
+
+def _continuum_dir() -> Path:
+    return config.get_continuum_data_dir()
+
+
+def _read_json_file(name: str, default: Any) -> Any:
+    path = _continuum_dir() / name
+    if not path.exists():
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning("Continuum: failed to read %s: %s", name, e)
+        return default
+
+
+def _write_json_file(name: str, data: Any) -> None:
+    path = _continuum_dir() / name
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, default=str)
+
+
+@app.get("/continuum/schedules", dependencies=[Depends(_check_bridge_api_key)])
+async def continuum_get_schedules():
+    """Get Continuum schedules (persisted on server). Returns list; empty if none."""
+    data = _read_json_file(_CONTINUUM_SCHEDULES_FILE, [])
+    if not isinstance(data, list):
+        return []
+    return data
+
+
+@app.put("/continuum/schedules", dependencies=[Depends(_check_bridge_api_key)])
+async def continuum_put_schedules(schedules: List[Any]):
+    """Save Continuum schedules (persisted under DATA_DIR/continuum)."""
+    try:
+        _write_json_file(_CONTINUUM_SCHEDULES_FILE, schedules)
+        return {"ok": True, "count": len(schedules)}
+    except Exception as e:
+        logger.exception("Continuum: failed to write schedules")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/continuum/settings", dependencies=[Depends(_check_bridge_api_key)])
+async def continuum_get_settings():
+    """Get Continuum settings (OWA config, gemini key). Returns dict; empty if none."""
+    data = _read_json_file(_CONTINUUM_SETTINGS_FILE, {})
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+@app.put("/continuum/settings", dependencies=[Depends(_check_bridge_api_key)])
+async def continuum_put_settings(settings: dict):
+    """Save Continuum settings (persisted under DATA_DIR/continuum)."""
+    try:
+        _write_json_file(_CONTINUUM_SETTINGS_FILE, settings)
+        return {"ok": True}
+    except Exception as e:
+        logger.exception("Continuum: failed to write settings")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================

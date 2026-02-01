@@ -79,6 +79,11 @@ class Filter:
             default=30.0,
             description="HTTP request timeout in seconds"
         )
+        # Advanced Settings: custom synthesizer prompt
+        SYNTHESIS_SYSTEM_PROMPT: str = Field(
+            default="",
+            description="[Advanced Settings] Custom system prompt for memory synthesis. Leave empty to use the default. Only change if you need different synthesis behavior (e.g. tone, structure, or language)."
+        )
         priority: int = Field(
             default=0,
             description="Filter priority (lower = runs earlier)"
@@ -166,17 +171,20 @@ class Filter:
             })
 
         # Fetch synthesized context from the server
+        context_payload = {
+            "model_id": model_id,
+            "query": query,
+            "user_name": user_name,
+            "limit": self.valves.MAX_PEARLS,
+            "max_words": self.valves.MAX_CONTEXT_WORDS
+        }
+        if self.valves.SYNTHESIS_SYSTEM_PROMPT and self.valves.SYNTHESIS_SYSTEM_PROMPT.strip():
+            context_payload["synthesis_system_prompt"] = self.valves.SYNTHESIS_SYSTEM_PROMPT.strip()
         try:
             async with httpx.AsyncClient(timeout=self.valves.REQUEST_TIMEOUT) as client:
                 response = await client.post(
                     f"{self.valves.MEMORY_SERVER_URL}/memory/context",
-                    json={
-                        "model_id": model_id,
-                        "query": query,
-                        "user_name": user_name,
-                        "limit": self.valves.MAX_PEARLS,
-                        "max_words": self.valves.MAX_CONTEXT_WORDS
-                    }
+                    json=context_payload
                 )
                 response.raise_for_status()
                 data = response.json()

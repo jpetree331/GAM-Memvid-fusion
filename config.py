@@ -95,6 +95,17 @@ class Config:
     # Legacy: models directory (for migration compatibility)
     MODELS_DIR: Path = DATA_DIR / "models"
 
+    # Continuum app persistence (schedules, settings) - under DATA_DIR for volume mount
+    CONTINUUM_DATA_DIR: Path = DATA_DIR / "continuum"
+
+    # =========================================================================
+    # Continuum Bridge (OpenWebUI for journal/scheduler)
+    # =========================================================================
+    CONTINUUM_OPENWEBUI_BASE_URL: str = os.getenv("CONTINUUM_OPENWEBUI_BASE_URL", "").rstrip("/")
+    CONTINUUM_OPENWEBUI_API_KEY: str = os.getenv("CONTINUUM_OPENWEBUI_API_KEY", "")
+    # Optional: require Authorization: Bearer <key> or X-API-Key on /continuum/* requests
+    CONTINUUM_BRIDGE_API_KEY: str = os.getenv("CONTINUUM_BRIDGE_API_KEY", "")
+
     # =========================================================================
     # Memory Style Guide
     # =========================================================================
@@ -146,6 +157,12 @@ class Config:
         """Get the vaults directory, creating it if needed."""
         cls.VAULTS_DIR.mkdir(parents=True, exist_ok=True)
         return cls.VAULTS_DIR
+
+    @classmethod
+    def get_continuum_data_dir(cls) -> Path:
+        """Get the Continuum persistence directory (schedules, settings). Create if needed."""
+        cls.CONTINUUM_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        return cls.CONTINUUM_DATA_DIR
 
     # =========================================================================
     # Validation
