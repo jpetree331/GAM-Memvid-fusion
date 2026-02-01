@@ -8,7 +8,7 @@ Usage:
 import json
 import argparse
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
@@ -120,9 +120,9 @@ def parse_openwebui_export(file_path: Path) -> tuple[list[MessagePair], dict]:
             try:
                 if isinstance(ts_val, (int, float)):
                     if ts_val > 1e12:  # Milliseconds
-                        ts = datetime.fromtimestamp(ts_val / 1000)
+                        ts = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc)
                     else:
-                        ts = datetime.fromtimestamp(ts_val)
+                        ts = datetime.fromtimestamp(ts_val, tz=timezone.utc)
                 else:
                     ts = datetime.fromisoformat(str(ts_val).replace("Z", "+00:00"))
             except (ValueError, TypeError, OSError):
