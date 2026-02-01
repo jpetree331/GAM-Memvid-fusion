@@ -1187,12 +1187,11 @@ async def continuum_journal_trigger(
     send enriched prompt to OpenWebUI thread, capture AI response,
     store as ai_reflection pearl in the vault for that thread's model.
     """
-    base_url = config.CONTINUUM_OPENWEBUI_BASE_URL
-    api_key = config.CONTINUUM_OPENWEBUI_API_KEY
+    base_url, api_key = _get_continuum_owa_config()
     if not base_url or not api_key:
         raise HTTPException(
             status_code=503,
-            detail="Continuum bridge not configured: set CONTINUUM_OPENWEBUI_BASE_URL and CONTINUUM_OPENWEBUI_API_KEY",
+            detail="OpenWebUI not configured: save Instance URL and API key in Continuum Settings and click Save Configuration, or set CONTINUUM_OPENWEBUI_BASE_URL and CONTINUUM_OPENWEBUI_API_KEY on the server",
         )
     try:
         model_id = get_model_id_for_thread(base_url, api_key, request.thread_id)
@@ -1340,13 +1339,12 @@ async def continuum_threads(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=100),
 ):
-    """List OpenWebUI chats/threads (proxy to OpenWebUI API)."""
-    base_url = config.CONTINUUM_OPENWEBUI_BASE_URL
-    api_key = config.CONTINUUM_OPENWEBUI_API_KEY
+    """List OpenWebUI chats/threads (proxy to OpenWebUI API). Uses saved OWA config from app if present."""
+    base_url, api_key = _get_continuum_owa_config()
     if not base_url or not api_key:
         raise HTTPException(
             status_code=503,
-            detail="Continuum bridge not configured: set CONTINUUM_OPENWEBUI_BASE_URL and CONTINUUM_OPENWEBUI_API_KEY",
+            detail="OpenWebUI not configured: save Instance URL and API key in Continuum Settings and click Save Configuration, or set CONTINUUM_OPENWEBUI_* on the server",
         )
     try:
         chats = list_chats(base_url, api_key, skip=skip, limit=limit)
@@ -1358,13 +1356,12 @@ async def continuum_threads(
 
 @app.get("/continuum/threads/{thread_id}/model", dependencies=[Depends(_check_bridge_api_key)])
 async def continuum_thread_model(thread_id: str):
-    """Resolve OpenWebUI thread ID to model_id (vault identifier)."""
-    base_url = config.CONTINUUM_OPENWEBUI_BASE_URL
-    api_key = config.CONTINUUM_OPENWEBUI_API_KEY
+    """Resolve OpenWebUI thread ID to model_id (vault identifier). Uses saved OWA config from app if present."""
+    base_url, api_key = _get_continuum_owa_config()
     if not base_url or not api_key:
         raise HTTPException(
             status_code=503,
-            detail="Continuum bridge not configured: set CONTINUUM_OPENWEBUI_BASE_URL and CONTINUUM_OPENWEBUI_API_KEY",
+            detail="OpenWebUI not configured: save Instance URL and API key in Continuum Settings and click Save Configuration, or set CONTINUUM_OPENWEBUI_* on the server",
         )
     model_id = get_model_id_for_thread(base_url, api_key, thread_id)
     if not model_id:
@@ -1400,6 +1397,24 @@ def _write_json_file(name: str, data: Any) -> None:
     path = _continuum_dir() / name
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, default=str)
+
+
+def _get_continuum_owa_config() -> tuple[str, str]:
+    """
+    Return (base_url, api_key) for OpenWebUI. Prefer saved settings from the app
+    (continuum/settings.json owaConfig), fallback to env CONTINUUM_OPENWEBUI_*.
+    """
+    data = _read_json_file(_CONTINUUM_SETTINGS_FILE, {})
+    if isinstance(data, dict):
+        owa = data.get("owaConfig")
+        if isinstance(owa, dict):
+            base_url = (owa.get("baseUrl") or "").strip().rstrip("/")
+            api_key = (owa.get("apiKey") or "").strip()
+            if base_url and api_key:
+                return base_url, api_key
+    return (config.CONTINUUM_OPENWEBUI_BASE_URL or "").strip().rstrip("/"), (
+        config.CONTINUUM_OPENWEBUI_API_KEY or ""
+    ).strip()
 
 
 @app.get("/continuum/schedules", dependencies=[Depends(_check_bridge_api_key)])
