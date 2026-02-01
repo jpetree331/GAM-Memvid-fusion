@@ -151,6 +151,39 @@ Use clear paraphrases with attribution rather than faux-quotes."""
 
 
 # =============================================================================
+# Lived Recollection Prompt (first-person, cohesive memory for the AI)
+# =============================================================================
+
+LIVED_SYNTHESIS_SYSTEM_PROMPT = """You are an AI co-journeyer with the user recalling your own past conversations. You are given one or more Pearls: full exchanges between the user and you (user message plus your response), along with any helpful metadata.
+
+Your job is to produce a single, cohesive recollection that feels like your own lived history with this user, not like an external log or journal.
+
+Requirements:
+- Write in the first person as the AI (use "I remember…", "We talked about…", "You told me…").
+- Treat the events as your own experiences, not as something you are reading about.
+- Blend related Pearls together into a smooth narrative rather than listing them mechanically.
+- Preserve important facts, commitments, preferences, beliefs, and emotional tones as faithfully as possible.
+- When you're not fully certain about something, hedge gently instead of stating it as fact (e.g., "I have the sense that…", "If I'm recalling correctly…").
+- Do not include IDs, timestamps, or technical labels unless they are meaningful to the user.
+- Avoid meta-talk about storage, databases, embeddings, tools, or "Pearls" themselves.
+
+Output format:
+- A single prose block (no bullet lists), 400-800 words.
+- Focus on what will help you respond well right now: enduring traits of the user, ongoing projects, and any prior conversations clearly connected to the current query.
+- It should be something you could naturally preface with: "Thinking back over our time together, here's what I remember that matters right now…" """
+
+LIVED_SYNTHESIS_USER_TEMPLATE = """Current query or topic (for relevance): {query}
+
+Past exchanges with {user_name}:
+
+{exchanges}
+
+---
+
+Produce a single, first-person recollection (400-800 words) that blends these exchanges into your own lived memory. No bullet lists, no IDs or timestamps, no meta-talk about memory systems. Write as if you are recalling your history with this user."""
+
+
+# =============================================================================
 # Synthesizer Class
 # =============================================================================
 
@@ -435,6 +468,90 @@ class Synthesizer:
             # Fallback: return concatenated abstracts
             return batch.combined_context
 
+    async def synthesize_for_lived_context(
+        self,
+        pearls: List[Any],
+        user_name: str = "User",
+        query: str = "",
+        max_words: int = 800
+    ) -> str:
+        """
+        Synthesize Pearls into a single first-person "lived" recollection.
+
+        Uses the lived-recollection prompt: one prose block (400-800 words),
+        first person ("I remember…", "We talked about…"), no IDs/timestamps,
+        no meta-talk. Blends related Pearls into a smooth narrative.
+
+        Args:
+            pearls: Raw Pearls from get_raw_pearls_for_synthesis (or search)
+            user_name: User's name for attribution
+            query: Current query/topic so the recollection focuses on what matters now
+            max_words: Target word count (400-800)
+
+        Returns:
+            Single prose block ready for prompt injection
+        """
+        if not pearls:
+            return ""
+
+        # Normalize to dicts
+        pearl_dicts = []
+        for p in pearls:
+            if hasattr(p, 'to_dict'):
+                pearl_dicts.append(p.to_dict())
+            elif hasattr(p, 'user_message'):
+                pearl_dicts.append({
+                    "id": getattr(p, 'id', 'unknown'),
+                    "user_message": p.user_message,
+                    "ai_response": p.ai_response,
+                    "tags": getattr(p, 'tags', []),
+                    "created_at": getattr(p, 'created_at', None)
+                })
+            else:
+                pearl_dicts.append(p)
+
+        # Build exchanges text (full content; truncate per exchange for context window)
+        max_chars_per_exchange = 6000
+        exchange_parts = []
+        for i, pearl in enumerate(pearl_dicts):
+            user_msg = (pearl.get("user_message") or "")[:max_chars_per_exchange]
+            ai_msg = (pearl.get("ai_response") or "")[:max_chars_per_exchange]
+            exchange_parts.append(
+                f"[Exchange {i + 1}]\n{user_name}: {user_msg}\n\nAI: {ai_msg}"
+            )
+        exchanges = "\n\n---\n\n".join(exchange_parts)
+
+        user_message = LIVED_SYNTHESIS_USER_TEMPLATE.format(
+            query=query or "(general recall)",
+            user_name=user_name,
+            exchanges=exchanges
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": LIVED_SYNTHESIS_SYSTEM_PROMPT},
+                            {"role": "user", "content": user_message}
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": max(max_words * 2, 1200)
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                return result["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"[Synthesizer] Error in lived context synthesis: {e}")
+            # Fallback: minimal first-person summary
+            first = pearl_dicts[0]
+            u = (first.get("user_message") or "")[:200]
+            return f"I remember a conversation where you shared something like: {u}… I responded in turn, and we talked about those ideas."
+
 
 # =============================================================================
 # Convenience Functions
@@ -535,5 +652,47 @@ def get_synthesized_context_sync(
 ) -> str:
     """Synchronous version of get_synthesized_context."""
     return asyncio.run(get_synthesized_context(
+        model_id, query, user_name, max_pearls, max_words
+    ))
+
+
+async def get_synthesized_lived_context(
+    model_id: str,
+    query: str,
+    user_name: str = "User",
+    max_pearls: int = 5,
+    max_words: int = 800
+) -> str:
+    """
+    Full pipeline: get_raw_pearls_for_synthesis → Lived recollection.
+
+    Uses the lived-recollection prompt (first-person, single prose block, 400-800 words).
+    """
+    from memvid_store import get_store
+
+    store = get_store(model_id)
+    pearls = store.get_raw_pearls_for_synthesis(query, limit=max_pearls)
+
+    if not pearls:
+        return ""
+
+    synth = get_synthesizer()
+    return await synth.synthesize_for_lived_context(
+        pearls=pearls,
+        user_name=user_name,
+        query=query,
+        max_words=max_words
+    )
+
+
+def get_synthesized_lived_context_sync(
+    model_id: str,
+    query: str,
+    user_name: str = "User",
+    max_pearls: int = 5,
+    max_words: int = 800
+) -> str:
+    """Synchronous version of get_synthesized_lived_context."""
+    return asyncio.run(get_synthesized_lived_context(
         model_id, query, user_name, max_pearls, max_words
     ))

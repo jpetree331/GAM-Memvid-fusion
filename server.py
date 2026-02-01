@@ -673,6 +673,55 @@ async def get_context(request: ContextRequest):
         )
 
 
+@app.post("/memory/lived_context", response_model=ContextResponse)
+async def get_lived_context(request: ContextRequest):
+    """
+    Get synthesized context using the "lived" recollection prompt.
+
+    Same request/response as /memory/context, but uses first-person,
+    cohesive narrative (400-800 words, no bullet lists, no IDs/timestamps).
+    Pearls are retrieved via get_raw_pearls_for_synthesis(query, limit).
+    """
+    try:
+        vault_mgr = get_vault_mgr()
+        synthesizer = get_synth()
+
+        store = vault_mgr.get_store(request.model_id)
+
+        pearls = store.get_raw_pearls_for_synthesis(
+            query=request.query,
+            limit=request.limit or 5
+        )
+
+        if not pearls:
+            return ContextResponse(
+                context="",
+                num_pearls=0,
+                has_memories=False
+            )
+
+        context = await synthesizer.synthesize_for_lived_context(
+            pearls=pearls,
+            user_name=request.user_name or "User",
+            query=request.query,
+            max_words=request.max_words or 400
+        )
+
+        return ContextResponse(
+            context=context,
+            num_pearls=len(pearls),
+            has_memories=True
+        )
+
+    except Exception as e:
+        logger.exception("Error getting lived context for model %s", request.model_id)
+        return ContextResponse(
+            context="",
+            num_pearls=0,
+            has_memories=False
+        )
+
+
 @app.post("/memory/search", response_model=SearchResponse)
 async def search_memories(request: SearchRequest):
     """Search for relevant Pearls (without synthesis)."""
