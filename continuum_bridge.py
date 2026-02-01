@@ -48,25 +48,21 @@ def list_chats(
     if not base_url or not api_key:
         return []
     url = f"{base_url.rstrip('/')}/api/v1/chats"
-    try:
-        with httpx.Client(timeout=timeout) as client:
-            r = client.get(
-                url,
-                params={"skip": skip, "limit": limit},
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            r.raise_for_status()
-            data = r.json()
-            if isinstance(data, list):
-                return data
-            # Some APIs return { "chats": [...] } or { "data": [...] }
-            return data.get("chats") or data.get("data") or []
-    except Exception as e:
-        print(f"[ContinuumBridge] list_chats error: {e}")
-        return []
+    with httpx.Client(timeout=timeout) as client:
+        r = client.get(
+            url,
+            params={"skip": skip, "limit": limit},
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, list):
+            return data
+        # Some APIs return { "chats": [...] } or { "data": [...] }
+        return data.get("chats") or data.get("data") or []
 
 
 def get_model_id_for_thread(
