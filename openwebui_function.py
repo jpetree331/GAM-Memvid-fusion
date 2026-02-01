@@ -1,29 +1,25 @@
 """
-OpenWebUI Functions for GAM-Memvid (Librarian Architecture)
+OpenWebUI Tools for GAM-Memvid (Librarian Architecture)
 
-This provides Functions (Tools) that can be used in OpenWebUI to:
-1. Search and retrieve memory context
-2. Store conversation exchanges
-3. Manage memories (delete, list, etc.)
-
-These can be used as:
-- Standalone tools the AI can call
-- Building blocks for custom pipes
-- Manual memory operations
+Provides Tools that the AI can call to:
+- Search memories
+- Remember specific things
+- Forget memories
+- View memory stats
 
 INSTALLATION:
 1. Deploy the GAM-Memvid server (server.py)
 2. In OpenWebUI: Admin → Functions → Create Function
-3. Paste this code (or specific tools you want)
+3. Paste this code
 4. Configure the MEMORY_SERVER_URL valve
+5. Enable on your model (checkbox should appear)
 
-Note: For automatic memory (every turn), use the Filter instead.
-These Functions are for explicit/manual memory operations.
+Note: For automatic memory (every turn), use openwebui_filter.py instead.
+These Tools are for explicit/manual memory operations the AI can invoke.
 """
 
-import os
 import httpx
-from typing import Optional, List
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
@@ -31,8 +27,7 @@ class Tools:
     """
     GAM-Memvid Memory Tools for OpenWebUI.
 
-    Provides explicit memory operations that the AI or user can invoke.
-    Unlike the Filter (automatic), these are called on-demand.
+    Provides explicit memory operations that the AI can invoke on-demand.
     """
 
     class Valves(BaseModel):
@@ -314,194 +309,3 @@ class Tools:
             return "Error: Memory server request timed out."
         except Exception as e:
             return f"Error getting stats: {str(e)[:100]}"
-
-
-# =============================================================================
-# Pipe Alternative (for use as a processing pipe instead of tools)
-# =============================================================================
-
-class Pipe:
-    """
-    GAM-Memvid Memory Pipe for OpenWebUI.
-
-    This can be used as a Pipe (message processor) instead of or
-    alongside the Filter. It provides the same functionality but
-    in Pipe format.
-
-    For most use cases, the Filter is recommended as it integrates
-    more seamlessly with OpenWebUI's message flow.
-    """
-
-    class Valves(BaseModel):
-        """Configuration for the memory pipe."""
-        MEMORY_SERVER_URL: str = Field(
-            default="http://localhost:8100",
-            description="URL of the GAM-Memvid server"
-        )
-        ENABLE_RETRIEVAL: bool = Field(
-            default=True,
-            description="Retrieve memories before AI responds"
-        )
-        ENABLE_STORAGE: bool = Field(
-            default=True,
-            description="Store exchanges after AI responds"
-        )
-        MAX_PEARLS: int = Field(
-            default=5,
-            description="Maximum Pearls to retrieve"
-        )
-        MAX_CONTEXT_WORDS: int = Field(
-            default=400,
-            description="Target context word count"
-        )
-        USER_NAME: str = Field(
-            default="User",
-            description="Your name for personalized memories"
-        )
-
-    def __init__(self):
-        self.valves = self.Valves()
-
-    def _get_model_id(self, body: dict) -> str:
-        """Extract model ID from request."""
-        model_id = body.get("model", "default")
-        return model_id.strip() if model_id else "default"
-
-    async def pipe(
-        self,
-        body: dict,
-        __user__: Optional[dict] = None
-    ) -> dict:
-        """
-        Process messages through the memory system.
-
-        This is called before the model processes the request.
-        It retrieves relevant context and injects it.
-        """
-        if not self.valves.ENABLE_RETRIEVAL:
-            return body
-
-        messages = body.get("messages", [])
-        if not messages:
-            return body
-
-        model_id = self._get_model_id(body)
-        user_name = self.valves.USER_NAME
-        if __user__ and __user__.get("name"):
-            user_name = __user__.get("name")
-
-        # Get last user message
-        query = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                query = msg.get("content", "")
-                if isinstance(query, list):
-                    # Handle multimodal
-                    query = " ".join(
-                        p.get("text", "") if isinstance(p, dict) else str(p)
-                        for p in query
-                    )
-                break
-
-        if not query:
-            return body
-
-        # Fetch context
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.valves.MEMORY_SERVER_URL}/memory/context",
-                    json={
-                        "model_id": model_id,
-                        "query": query,
-                        "user_name": user_name,
-                        "limit": self.valves.MAX_PEARLS,
-                        "max_words": self.valves.MAX_CONTEXT_WORDS
-                    }
-                )
-                response.raise_for_status()
-                data = response.json()
-                context = data.get("context", "")
-
-        except Exception as e:
-            print(f"[GAM Pipe] Error fetching context: {e}")
-            return body
-
-        # Inject context
-        if context:
-            context_msg = {
-                "role": "system",
-                "content": f"## Memory Context\n\n{context}"
-            }
-
-            # Find system message or prepend
-            for i, msg in enumerate(messages):
-                if msg.get("role") == "system":
-                    messages[i]["content"] += f"\n\n{context_msg['content']}"
-                    break
-            else:
-                messages.insert(0, context_msg)
-
-            body["messages"] = messages
-
-        return body
-
-    async def on_completion(
-        self,
-        body: dict,
-        __user__: Optional[dict] = None
-    ):
-        """
-        Called after model generates a response.
-
-        Stores the exchange in memory.
-        """
-        if not self.valves.ENABLE_STORAGE:
-            return
-
-        messages = body.get("messages", [])
-        if len(messages) < 2:
-            return
-
-        model_id = self._get_model_id(body)
-        user_name = self.valves.USER_NAME
-        if __user__ and __user__.get("name"):
-            user_name = __user__.get("name")
-
-        # Extract user message and AI response
-        user_message = ""
-        ai_response = ""
-
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant" and not ai_response:
-                ai_response = msg.get("content", "")
-            elif msg.get("role") == "user" and not user_message:
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    user_message = " ".join(
-                        p.get("text", "") if isinstance(p, dict) else str(p)
-                        for p in content
-                    )
-                else:
-                    user_message = content
-
-            if user_message and ai_response:
-                break
-
-        if not user_message or not ai_response:
-            return
-
-        # Store the exchange
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                await client.post(
-                    f"{self.valves.MEMORY_SERVER_URL}/memory/add",
-                    json={
-                        "model_id": model_id,
-                        "user_message": user_message,
-                        "ai_response": ai_response,
-                        "user_name": user_name
-                    }
-                )
-        except Exception as e:
-            print(f"[GAM Pipe] Error storing memory: {e}")

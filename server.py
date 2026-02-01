@@ -952,6 +952,14 @@ async def get_recent_memories(
         try:
             memories = store.get_recent_pearls(limit=limit)
             logger.info(f"store.get_recent_pearls returned {len(memories)} items")
+            
+            # DEBUG: Check if Pearls have content
+            if memories:
+                logger.info(f"First memory type: {type(memories[0]).__name__}")
+                logger.info(f"First memory has user_message: {hasattr(memories[0], 'user_message')}")
+                logger.info(f"First memory user_message length: {len(memories[0].user_message) if hasattr(memories[0], 'user_message') and memories[0].user_message else 0}")
+                logger.info(f"First memory has ai_response: {hasattr(memories[0], 'ai_response')}")
+                logger.info(f"First memory ai_response length: {len(memories[0].ai_response) if hasattr(memories[0], 'ai_response') and memories[0].ai_response else 0}")
         except AttributeError:
             # Fallback: use category-based search to get ALL Pearls (like export does)
             logger.warning("get_recent_pearls not available, using category-based search")
@@ -975,35 +983,48 @@ async def get_recent_memories(
             memories = memories[:limit]
             logger.info(f"category-based search returned {len(memories)} items")
 
-        # DEBUG: Log RAW pearls before hydration
-        logger.debug("=" * 80)
-        logger.debug("RAW PEARLS FROM STORE (before hydration):")
-        for i, m in enumerate(memories[:3]):  # Log first 3
-            logger.debug(f"  RAW[{i}] type: {type(m).__name__}")
+        # DEBUG: Log RAW pearls before hydration (use INFO level so we see it)
+        logger.info("=" * 80)
+        logger.info("RAW PEARLS FROM STORE (before hydration):")
+        logger.info(f"Total memories returned: {len(memories)}")
+        for i, m in enumerate(memories):  # Log ALL to see IDs
+            logger.info(f"  RAW[{i}] type: {type(m).__name__}")
+            if hasattr(m, 'id'):
+                logger.info(f"  RAW[{i}] .id: {m.id}")
             if hasattr(m, '__dict__'):
-                logger.debug(f"  RAW[{i}] __dict__ keys: {list(m.__dict__.keys())}")
+                logger.info(f"  RAW[{i}] __dict__ keys: {list(m.__dict__.keys())}")
+                if 'id' in m.__dict__:
+                    logger.info(f"  RAW[{i}] __dict__['id']: {m.__dict__['id']}")
             if hasattr(m, 'user_message'):
-                logger.debug(f"  RAW[{i}] .user_message (first 100): {m.user_message[:100] if m.user_message else 'EMPTY'}")
+                user_msg = m.user_message[:100] if m.user_message else 'EMPTY'
+                logger.info(f"  RAW[{i}] .user_message (first 100): {user_msg}")
             if hasattr(m, 'ai_response'):
-                logger.debug(f"  RAW[{i}] .ai_response (first 100): {m.ai_response[:100] if m.ai_response else 'EMPTY'}")
-            if hasattr(m, 'metadata'):
-                logger.debug(f"  RAW[{i}] .metadata keys: {list(m.metadata.keys()) if isinstance(m.metadata, dict) else 'NOT A DICT'}")
+                ai_msg = m.ai_response[:100] if m.ai_response else 'EMPTY'
+                logger.info(f"  RAW[{i}] .ai_response (first 100): {ai_msg}")
             if isinstance(m, dict):
-                logger.debug(f"  RAW[{i}] dict keys: {list(m.keys())}")
-        logger.debug("=" * 80)
+                logger.info(f"  RAW[{i}] dict keys: {list(m.keys())}")
+                if 'id' in m:
+                    logger.info(f"  RAW[{i}] dict['id']: {m['id']}")
+        logger.info("=" * 80)
 
         # Hydrate all results
         hydrated = [hydrate_pearl(m) for m in memories]
 
-        # DEBUG: Log HYDRATED results
-        logger.debug("=" * 80)
-        logger.debug("HYDRATED PEARLS (after hydration):")
+        # DEBUG: Log HYDRATED results (use INFO level so we see it)
+        logger.info("=" * 80)
+        logger.info("HYDRATED PEARLS (after hydration):")
         for i, h in enumerate(hydrated[:3]):  # Log first 3
-            logger.debug(f"  HYDRATED[{i}] id: {h.get('id')}")
-            logger.debug(f"  HYDRATED[{i}] user_message (first 100): {h.get('user_message', '')[:100] if h.get('user_message') else 'EMPTY'}")
-            logger.debug(f"  HYDRATED[{i}] ai_response (first 100): {h.get('ai_response', '')[:100] if h.get('ai_response') else 'EMPTY'}")
-            logger.debug(f"  HYDRATED[{i}] created_at: {h.get('created_at')}")
-        logger.debug("=" * 80)
+            logger.info(f"  HYDRATED[{i}] id: {h.get('id')}")
+            user_msg = h.get('user_message', '')
+            ai_msg = h.get('ai_response', '')
+            logger.info(f"  HYDRATED[{i}] user_message (first 100): {user_msg[:100] if user_msg else 'EMPTY'}")
+            logger.info(f"  HYDRATED[{i}] user_message full length: {len(user_msg)}")
+            logger.info(f"  HYDRATED[{i}] ai_response (first 100): {ai_msg[:100] if ai_msg else 'EMPTY'}")
+            logger.info(f"  HYDRATED[{i}] ai_response full length: {len(ai_msg)}")
+            logger.info(f"  HYDRATED[{i}] created_at: {h.get('created_at')}")
+            logger.info(f"  HYDRATED[{i}] text field: {h.get('text', '')[:100] if h.get('text') else 'EMPTY'}")
+            logger.info(f"  HYDRATED[{i}] content field: {h.get('content', '')[:100] if h.get('content') else 'EMPTY'}")
+        logger.info("=" * 80)
 
         # Sort by created_at (most recent first)
         hydrated.sort(key=lambda x: x.get("created_at") or "", reverse=True)

@@ -668,7 +668,7 @@ class Pearl:
             effective_created_at = datetime.now(timezone.utc).isoformat()
 
         return cls(
-            id=hit_dict.get("frame_id", hit_dict.get("title", "")),
+            id=hit_dict.get("title", hit_dict.get("frame_id", "")),
             user_message=user_message,
             ai_response=ai_response,
             tags=tags,
@@ -1415,63 +1415,217 @@ class MemvidStore:
         not just search results.
         """
         try:
+            print(f"[get_recent_pearls] Starting retrieval for model={self.model_id}, limit={limit}")
             deleted_ids = self.get_deleted_pearl_ids()
+            print(f"[get_recent_pearls] Deleted IDs count: {len(deleted_ids)}")
             hits = []
 
-            # Try timeline first (most efficient)
-            if hasattr(self._mv, 'timeline'):
-                try:
-                    result = self._mv.timeline(limit=limit * 2)
-                    hits = _extract_hits_from_result(result, "get_recent_pearls.timeline")
-                except Exception as timeline_err:
-                    err_str = str(timeline_err)
-                    if "MV005" in err_str:
-                        # MV005: Vault too small for timeline - fall through
-                        if _DEBUG_SDK_TYPES:
-                            print(f"[Librarian DEBUG] MV005 ignored: Vault too small for timeline")
-                    else:
-                        raise
+            # SKIP timeline() - it returns hits without metadata/text fields
+            # Instead, use category search which returns full hits with metadata
+            # Try timeline first (most efficient) - BUT SKIP IT because it doesn't return metadata
+            # if hasattr(self._mv, 'timeline'):
+            #     try:
+            #         print(f"[get_recent_pearls] Trying timeline()...")
+            #         result = self._mv.timeline(limit=limit * 2)
+            #         hits = _extract_hits_from_result(result, "get_recent_pearls.timeline")
+            #         print(f"[get_recent_pearls] Timeline returned {len(hits)} hits")
+            #     except Exception as timeline_err:
+            #         err_str = str(timeline_err)
+            #         print(f"[get_recent_pearls] Timeline error: {err_str}")
+            #         if "MV005" in err_str:
+            #             # MV005: Vault too small for timeline - fall through
+            #             if _DEBUG_SDK_TYPES:
+            #                 print(f"[Librarian DEBUG] MV005 ignored: Vault too small for timeline")
+            #         else:
+            #             raise
 
-            # Fallback: Search across all categories (like export() does) to get ALL Pearls
-            if not hits:
-                all_hits = []
-                from memory_entry import MemoryCategory
-                for cat in MemoryCategory:
-                    try:
-                        find_result = self._mv.find(f"category:{cat.value}", k=limit * 10, mode="lex")
-                        cat_hits = _extract_hits_from_result(find_result, f"get_recent_pearls.category.{cat.value}")
-                        all_hits.extend(cat_hits)
-                    except Exception:
-                        pass
-                hits = all_hits
-
-            # If still no hits, try empty string search as last resort
-            if not hits:
+            # Use the same approach as export() - search by category with find()
+            # This is the proven method that works in export()
+            print(f"[get_recent_pearls] Using export() method: searching by category...")
+            all_hits = []
+            from memory_entry import MemoryCategory
+            print(f"[get_recent_pearls] MemoryCategory values: {[cat.value for cat in MemoryCategory]}")
+            
+            for cat in MemoryCategory:
                 try:
-                    result = self._mv.find("", k=limit * 3, mode="lex")
-                    hits = _extract_hits_from_result(result, "get_recent_pearls.find")
-                except Exception:
+                    # Use exact same query format as export()
+                    query = f"category:{cat.value}"
+                    print(f"[get_recent_pearls] Searching with query: {query}")
+                    find_result = self._mv.find(query, k=limit * 10, mode="lex")
+                    cat_hits = _extract_hits_from_result(find_result, f"get_recent_pearls.category.{cat.value}")
+                    print(f"[get_recent_pearls] Category {cat.value} returned {len(cat_hits)} hits")
+                    
+                    if cat_hits:
+                        # Debug first hit to see structure
+                        first_hit = _safe_parse_hit(cat_hits[0], "debug")
+                        print(f"[get_recent_pearls] First hit keys: {list(first_hit.keys())}")
+                        print(f"[get_recent_pearls] First hit has metadata: {'metadata' in first_hit}")
+                        print(f"[get_recent_pearls] First hit has title: {'title' in first_hit}")
+                        print(f"[get_recent_pearls] First hit label: {first_hit.get('label', 'NO LABEL')[:200]}")
+                        # Check if metadata has full_payload
+                        meta = first_hit.get('metadata', {})
+                        if isinstance(meta, dict):
+                            print(f"[get_recent_pearls] First hit metadata keys: {list(meta.keys())}")
+                            print(f"[get_recent_pearls] First hit has full_payload: {'full_payload' in meta}")
+                    
+                    all_hits.extend(cat_hits)
+                except Exception as e:
+                    print(f"[get_recent_pearls] Error searching category {cat.value}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     pass
+            
+            hits = all_hits
+            print(f"[get_recent_pearls] Total category hits: {len(hits)}")
+            
+            # ALWAYS try status:active search as well to catch any pearls that don't match categories
+            # This ensures we get ALL active pearls, not just those matching category queries
+            print(f"[get_recent_pearls] Also searching by status:active to catch any missed pearls...")
+            try:
+                find_result = self._mv.find("status:active", k=limit * 10, mode="lex")
+                status_hits = _extract_hits_from_result(find_result, "get_recent_pearls.status")
+                print(f"[get_recent_pearls] Status:active search returned {len(status_hits)} hits")
+                # Add status hits to the collection (deduplication will handle duplicates)
+                hits.extend(status_hits)
+                print(f"[get_recent_pearls] Total hits after adding status:active: {len(hits)}")
+            except Exception as e:
+                print(f"[get_recent_pearls] Status search error: {e}")
+            
+            # ALSO search by title prefix "pearl_" to catch ANY pearls that might not match category/status
+            # This is a fallback to ensure we don't miss any pearls due to indexing issues
+            print(f"[get_recent_pearls] Also searching by title prefix 'pearl_' to catch any missed pearls...")
+            try:
+                # Try searching for "pearl_" which should match all pearl titles
+                find_result = self._mv.find("pearl_", k=limit * 10, mode="lex")
+                title_hits = _extract_hits_from_result(find_result, "get_recent_pearls.title_prefix")
+                print(f"[get_recent_pearls] Title prefix search ('pearl_') returned {len(title_hits)} hits")
+                # Add title hits to the collection (deduplication will handle duplicates)
+                hits.extend(title_hits)
+                print(f"[get_recent_pearls] Total hits after adding title prefix search: {len(hits)}")
+            except Exception as e:
+                print(f"[get_recent_pearls] Title prefix search error: {e}")
+            
+            # If still no hits, try a very broad search to see what's actually in the vault
+            if not hits:
+                print(f"[get_recent_pearls] No category hits! Trying broad searches to debug...")
+                
+                # Try searching by status:active
+                try:
+                    find_result = self._mv.find("status:active", k=limit * 10, mode="lex")
+                    status_hits = _extract_hits_from_result(find_result, "get_recent_pearls.status")
+                    print(f"[get_recent_pearls] Status:active search returned {len(status_hits)} hits")
+                    if status_hits:
+                        first_hit = _safe_parse_hit(status_hits[0], "debug")
+                        print(f"[get_recent_pearls] First status hit keys: {list(first_hit.keys())}")
+                        print(f"[get_recent_pearls] First status hit label: {first_hit.get('label', 'NO LABEL')[:200]}")
+                    hits = status_hits
+                except Exception as e:
+                    print(f"[get_recent_pearls] Status search error: {e}")
+                
+                # If still nothing, try searching for any text (very broad)
+                if not hits:
+                    try:
+                        # Try searching for common words that might be in fingerprints
+                        find_result = self._mv.find("the", k=limit * 10, mode="lex")
+                        broad_hits = _extract_hits_from_result(find_result, "get_recent_pearls.broad")
+                        print(f"[get_recent_pearls] Broad search ('the') returned {len(broad_hits)} hits")
+                        if broad_hits:
+                            first_hit = _safe_parse_hit(broad_hits[0], "debug")
+                            print(f"[get_recent_pearls] First broad hit label: {first_hit.get('label', 'NO LABEL')[:200]}")
+                        hits = broad_hits
+                    except Exception as e:
+                        print(f"[get_recent_pearls] Broad search error: {e}")
 
+            print(f"[get_recent_pearls] Total hits before filtering: {len(hits)}")
+            
+            # DEBUG: Log all titles to see if missing pearl is in the hits
+            print(f"[get_recent_pearls] DEBUG: Checking all hit titles for missing pearl...")
+            all_titles = []
+            for hit in hits:
+                hit_dict = _safe_parse_hit(hit, "get_recent_pearls.debug_title")
+                title = hit_dict.get("title", "")
+                if title:
+                    all_titles.append(title)
+            print(f"[get_recent_pearls] DEBUG: Found {len(all_titles)} titles in hits")
+            if "pearl_20260201_121309_203341" in all_titles:
+                print(f"[get_recent_pearls] *** FOUND MISSING PEARL IN HITS! ***")
+            else:
+                print(f"[get_recent_pearls] *** MISSING PEARL NOT IN HITS ***")
+                print(f"[get_recent_pearls] DEBUG: Sample titles: {sorted(all_titles)[:5]}")
+            
             pearls = []
             seen_ids = set()  # Deduplicate
+            skipped_deletion_markers = 0
+            skipped_no_id = 0
+            skipped_deleted = 0
+            skipped_duplicates = 0
+            
             for hit in hits:
                 hit_dict = _safe_parse_hit(hit, "get_recent_pearls.hit")
                 label = hit_dict.get("label", "")
                 if "deletion_marker" in label:
+                    skipped_deletion_markers += 1
                     continue
                 
-                pearl_id = hit_dict.get("title", "")
-                if pearl_id in deleted_ids or pearl_id in seen_ids:
+                # DEBUG: Check what ID fields are available
+                title_val = hit_dict.get("title")
+                frame_id_val = hit_dict.get("frame_id")
+                
+                # Get pearl ID - can be in 'title' or 'frame_id' field
+                pearl_id = hit_dict.get("title") or hit_dict.get("frame_id", "")
+                
+                # Special debug for the missing pearl
+                if pearl_id == "pearl_20260201_121309_203341":
+                    print(f"[get_recent_pearls] *** FOUND MISSING PEARL ***")
+                    print(f"[get_recent_pearls]   title={repr(title_val)}, frame_id={repr(frame_id_val)}")
+                    print(f"[get_recent_pearls]   extracted pearl_id={repr(pearl_id)}")
+                    print(f"[get_recent_pearls]   in deleted_ids: {pearl_id in deleted_ids}")
+                    print(f"[get_recent_pearls]   in seen_ids: {pearl_id in seen_ids}")
+                    print(f"[get_recent_pearls]   hit_dict keys: {list(hit_dict.keys())}")
+                
+                if not pearl_id:
+                    skipped_no_id += 1
+                    print(f"[get_recent_pearls] WARNING: Hit has no title or frame_id, skipping")
+                    print(f"[get_recent_pearls] Hit keys: {list(hit_dict.keys())}")
+                    continue
+                    
+                if pearl_id in deleted_ids:
+                    skipped_deleted += 1
+                    if pearl_id == "pearl_20260201_121309_203341":
+                        print(f"[get_recent_pearls] *** MISSING PEARL FILTERED: DELETED ***")
+                    print(f"[get_recent_pearls] Skipping deleted pearl: {pearl_id}")
+                    continue
+                if pearl_id in seen_ids:
+                    skipped_duplicates += 1
+                    if pearl_id == "pearl_20260201_121309_203341":
+                        print(f"[get_recent_pearls] *** MISSING PEARL FILTERED: DUPLICATE ***")
+                    print(f"[get_recent_pearls] Skipping duplicate pearl: {pearl_id}")
                     continue
                 seen_ids.add(pearl_id)
+                
+                if pearl_id == "pearl_20260201_121309_203341":
+                    print(f"[get_recent_pearls] *** MISSING PEARL ADDED TO RESULTS ***")
 
                 pearl = Pearl.from_memvid_hit(hit_dict, self.model_id)
                 pearls.append(pearl)
+                print(f"[get_recent_pearls] Added pearl {pearl_id}, user_msg_len={len(pearl.user_message)}, ai_msg_len={len(pearl.ai_response)}")
 
+            print(f"[get_recent_pearls] FILTERING SUMMARY:")
+            print(f"[get_recent_pearls]   Total hits: {len(hits)}")
+            print(f"[get_recent_pearls]   Skipped deletion markers: {skipped_deletion_markers}")
+            print(f"[get_recent_pearls]   Skipped (no ID): {skipped_no_id}")
+            print(f"[get_recent_pearls]   Skipped (deleted): {skipped_deleted}")
+            print(f"[get_recent_pearls]   Skipped (duplicates): {skipped_duplicates}")
+            print(f"[get_recent_pearls]   Valid pearls: {len(pearls)}")
+            print(f"[get_recent_pearls]   Unique pearl IDs found: {sorted(list(seen_ids))}")
+            
+            print(f"[get_recent_pearls] Total pearls before sorting: {len(pearls)}")
             # Sort by created_at (most recent first)
             pearls.sort(key=lambda p: p.created_at or "", reverse=True)
-            return pearls[:limit]
+            result = pearls[:limit]
+            print(f"[get_recent_pearls] After limit ({limit}): {len(result)} pearls")
+            print(f"[get_recent_pearls] Returning {len(result)} pearls")
+            return result
 
         except Exception as e:
             if "MV005" in str(e):
