@@ -100,3 +100,6 @@ scratchpad/
 # Example data (don't commit user conversations)
 # =============================================================================
 Examples/
+
+# Claude Code per-machine permissions; can hold secrets
+.claude/settings.local.json
